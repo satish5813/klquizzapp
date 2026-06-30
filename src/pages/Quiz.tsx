@@ -125,9 +125,19 @@ export default function Quiz() {
   const q = questions[idx];
   const answeredCount = Object.keys(answers).length;
 
-  // Exam layout: MCQ on the left, question palette on the right
+  // Exam layout: countdown timer on top; MCQ left, question palette right
   return (
-    <div className="grid gap-4 md:grid-cols-[1fr_260px]">
+    <div className="space-y-4">
+      {/* TOP: countdown timer bar */}
+      <div className={`sticky top-0 z-20 flex items-center justify-between rounded-xl px-4 py-2 text-white shadow ${remaining <= 60 ? 'bg-red-600' : 'bg-indigo-600'}`}>
+        <span className="text-sm font-semibold">Question {idx + 1} / {questions.length} · {Object.keys(answers).length} answered</span>
+        <span className="flex items-center gap-2">
+          <span className="text-[11px] uppercase tracking-wide opacity-80">Time left</span>
+          <span className="font-mono text-2xl font-extrabold tabular-nums">{fmt(remaining)}</span>
+        </span>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-[1fr_260px]">
       {/* LEFT: question + options */}
       <div className="space-y-4">
         <div className="card">
@@ -161,12 +171,8 @@ export default function Quiz() {
         </div>
       </div>
 
-      {/* RIGHT: timer + question number palette */}
-      <div className="card h-fit md:sticky md:top-4">
-        <div className={`mb-3 rounded-lg px-3 py-2 text-center ${remaining <= 60 ? 'bg-red-50 text-red-700' : 'bg-slate-50 text-slate-700'}`}>
-          <p className="text-[11px] font-semibold uppercase tracking-wide opacity-70">Time left</p>
-          <p className="font-mono text-2xl font-bold tabular-nums">{fmt(remaining)}</p>
-        </div>
+      {/* RIGHT: question number palette */}
+      <div className="card h-fit md:sticky md:top-16">
         <div className="mb-2 flex items-center justify-between">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Questions</p>
           <span className="text-xs text-slate-400">{answeredCount}/{questions.length}</span>
@@ -189,6 +195,7 @@ export default function Quiz() {
         </div>
         <button className="btn-primary mt-4 w-full" disabled={busy} onClick={submit}>{busy ? 'Submitting…' : 'Submit exam'}</button>
         <p className="mt-2 text-center text-[11px] text-red-500">Do not exit full screen or switch tabs.</p>
+      </div>
       </div>
     </div>
   );

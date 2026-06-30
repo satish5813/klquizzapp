@@ -29,10 +29,8 @@ export default function Welcome() {
   const s = data.student;
   const a = data.attempt;
   const sch = data.schedule;
-  // Schedule blocks only NEW starts (someone already in progress may resume).
   const blocked = a.state !== 'in_progress' && sch && sch.enabled && !sch.open;
 
-  // Already completed — cannot reopen
   if (a.state === 'completed') {
     const terminated = a.status === 'terminated';
     return (
@@ -47,7 +45,6 @@ export default function Welcome() {
     );
   }
 
-  // Outside the scheduled window
   if (blocked) {
     return (
       <div className="card mx-auto max-w-lg border-2 border-blue-200 text-center">
@@ -68,51 +65,71 @@ export default function Welcome() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl space-y-4">
-      {/* Student details */}
-      <div className="overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-100">
-        <div className="bg-gradient-to-r from-emerald-500 to-teal-500 px-5 py-3 text-white">
-          <p className="text-xs font-semibold uppercase tracking-wide text-white/80">Welcome</p>
-          <p className="text-xl font-bold">{s.name}</p>
-        </div>
-        <div className="grid grid-cols-3 divide-x divide-slate-100 text-center">
-          <Detail label="Registration No" value={s.registrationNumber} />
-          <Detail label="Branch" value={s.branch || '—'} />
-          <Detail label="Section" value={s.section || '—'} />
-        </div>
+    <div className="space-y-4">
+      {/* friendly top banner */}
+      <div className="rounded-2xl bg-gradient-to-r from-sky-400 to-indigo-400 px-5 py-3 text-white shadow">
+        <p className="text-sm">Hello 👋</p>
+        <p className="text-2xl font-extrabold">{s.name}</p>
       </div>
 
-      {/* Instructions */}
-      <div className="card border-l-4 border-blue-500">
-        <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-blue-700">📋 Exam instructions</h2>
-        <ul className="space-y-2 text-sm">
-          <li className="flex gap-2"><span className="text-blue-600">●</span> The exam has <b>{data.quizSize}</b> multiple-choice questions.</li>
-          <li className="flex gap-2"><span className="text-blue-600">●</span> You have <b>{data.durationMin} minutes</b>. A timer is shown; the exam <b>auto-submits</b> when time ends.</li>
-          <li className="flex gap-2"><span className="text-emerald-600">●</span> Questions are on the <b>left</b>; the <b>question palette</b> (jump to any question) is on the <b>right</b>.</li>
-          <li className="flex gap-2"><span className="text-emerald-600">●</span> Answered questions turn <span className="font-semibold text-green-600">green</span> in the palette.</li>
-          <li className="flex gap-2 rounded-lg bg-red-50 p-2 text-red-700"><span>⚠</span> The exam runs in <b>full screen</b>. If you <b>exit full screen</b> or <b>switch tabs/windows</b>, the exam ends immediately and is recorded as <b>0 marks</b>.</li>
-          <li className="flex gap-2"><span className="text-violet-600">●</span> You get <b>one attempt only</b>. Click <b>Submit</b> when done.</li>
-        </ul>
+      <div className="grid gap-4 md:grid-cols-[300px_1fr]">
+        {/* LEFT: profile */}
+        <div className="space-y-3">
+          <div className="rounded-2xl border-2 border-sky-200 bg-white p-4 shadow-sm">
+            <p className="mb-2 text-xs font-bold uppercase tracking-wide text-sky-600">Your profile</p>
+            <Row icon="🎓" label="Registration" value={s.registrationNumber} />
+            <Row icon="🏫" label="Branch" value={s.branch || '—'} />
+            <Row icon="📋" label="Section" value={s.section || '—'} />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Tile color="bg-emerald-100 text-emerald-700" big={`${data.quizSize}`} small="Questions" />
+            <Tile color="bg-orange-100 text-orange-700" big={`${data.durationMin}m`} small="Time" />
+          </div>
+        </div>
 
-        <label className="mt-4 flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm">
-          <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} className="h-4 w-4" />
-          I have read and understood the instructions, and I agree to the exam rules.
-        </label>
+        {/* RIGHT: instructions */}
+        <div className="rounded-2xl border-2 border-indigo-200 bg-white p-5 shadow-sm">
+          <h2 className="mb-3 flex items-center gap-2 text-lg font-extrabold text-indigo-700">📋 Instructions</h2>
+          <ul className="space-y-2 text-sm">
+            <li className="flex gap-2 rounded-lg bg-emerald-50 p-2"><span>✅</span><span><b>{data.quizSize} questions.</b> Each has 4 options — pick one.</span></li>
+            <li className="flex gap-2 rounded-lg bg-orange-50 p-2"><span>⏱️</span><span>You get <b>{data.durationMin} minutes</b>. A <b>timer at the top</b> counts down and the exam <b>auto-submits</b> when time is over.</span></li>
+            <li className="flex gap-2 rounded-lg bg-sky-50 p-2"><span>🧭</span><span>Questions show on the screen; the <b>number panel</b> lets you jump around. Answered ones turn <span className="font-semibold text-green-600">green</span>.</span></li>
+            <li className="flex gap-2 rounded-lg bg-red-50 p-2 text-red-700"><span>⚠️</span><span>The exam is <b>full screen</b>. If you <b>leave full screen</b> or <b>switch tabs</b>, it <b>ends with 0 marks</b>.</span></li>
+            <li className="flex gap-2 rounded-lg bg-violet-50 p-2"><span>1️⃣</span><span><b>One attempt only.</b> Press <b>Submit</b> when you finish.</span></li>
+          </ul>
 
-        {a.state === 'in_progress' && <p className="mt-3 text-xs text-amber-600">You have an exam already in progress — clicking below resumes it.</p>}
-        <button className="btn-primary mt-4 w-full py-3 text-base" disabled={!agree || busy} onClick={start}>
-          {busy ? 'Starting…' : a.state === 'in_progress' ? 'Resume exam in full screen' : 'Start exam in full screen'}
-        </button>
+          <label className="mt-4 flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-sm font-medium">
+            <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} className="h-4 w-4" />
+            I have read the instructions and agree to the rules.
+          </label>
+          {a.state === 'in_progress' && <p className="mt-2 text-xs text-amber-600">You already have an exam in progress — this will resume it.</p>}
+          <button className="mt-4 w-full rounded-xl bg-indigo-600 py-3 text-base font-bold text-white shadow transition hover:bg-indigo-700 disabled:opacity-50"
+            disabled={!agree || busy} onClick={start}>
+            {busy ? 'Starting…' : a.state === 'in_progress' ? '▶ Resume exam (full screen)' : '▶ Start exam (full screen)'}
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
-function Detail({ label, value }: { label: string; value: string }) {
+function Row({ icon, label, value }: { icon: string; label: string; value: string }) {
   return (
-    <div className="px-3 py-3">
-      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</p>
-      <p className="mt-0.5 font-semibold text-slate-800">{value}</p>
+    <div className="flex items-center gap-2 border-b border-slate-100 py-1.5 last:border-0">
+      <span className="text-lg">{icon}</span>
+      <div>
+        <p className="text-[11px] uppercase tracking-wide text-slate-400">{label}</p>
+        <p className="font-semibold text-slate-800">{value}</p>
+      </div>
+    </div>
+  );
+}
+
+function Tile({ color, big, small }: { color: string; big: string; small: string }) {
+  return (
+    <div className={`rounded-2xl ${color} p-3 text-center`}>
+      <p className="text-2xl font-extrabold">{big}</p>
+      <p className="text-xs font-medium">{small}</p>
     </div>
   );
 }
