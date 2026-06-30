@@ -8,7 +8,11 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { 'content-type': 'application/json', ...(init?.headers || {}) },
   });
   const text = await res.text();
-  const body = text ? JSON.parse(text) : null;
+  let body: any = null;
+  try { body = text ? JSON.parse(text) : null; } catch { /* non-JSON (e.g. an HTML error page) */ }
+  if (body === null && text.trim().startsWith('<')) {
+    throw new Error(`Server returned an error page (HTTP ${res.status}). Please try again or contact the coordinator.`);
+  }
   if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
   return body as T;
 }

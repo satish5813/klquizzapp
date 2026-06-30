@@ -24,7 +24,13 @@ async function req<T>(path: string, init: RequestInit = {}, auth = true): Promis
   if (auth) headers['x-admin-token'] = settings.token();
   const res = await fetch(settings.base() + path, { ...init, headers });
   const text = await res.text();
-  const body = text ? JSON.parse(text) : null;
+  let body: any = null;
+  try { body = text ? JSON.parse(text) : null; } catch { /* non-JSON (e.g. an HTML error page) */ }
+  if (body === null && text.trim().startsWith('<')) {
+    throw new Error(res.status === 404
+      ? `This feature isn't on the server yet (HTTP 404). Redeploy the API in Coolify to enable it.`
+      : `Server returned an error page (HTTP ${res.status}).`);
+  }
   if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
   return body as T;
 }
