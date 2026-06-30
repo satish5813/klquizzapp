@@ -153,16 +153,26 @@ app.post('/api/admin/import', requireAdmin, async (req, res) => {
   res.json({ added: toAdd.length, skipped: errors.length, errors: errors.slice(0, 50), bankTotal: await db.questions.count() });
 });
 
-/** Use Claude to extract ready-made MCQs from PDF text (returns them for preview/import). */
-app.post('/api/admin/parse-mcqs', requireAdmin, async (req, res) => {
+/** Use Claude to extract ready-made MCQs from PDF text. Runs as a background
+ *  job (poll GET /api/admin/jobs/:id) so long PDFs don't hit the proxy timeout. */
+app.post('/api/admin/parse-mcqs', requireAdmin, (req, res) => {
   const apiKey = String(req.body?.apiKey || '').trim() || process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(400).json({ error: 'No Claude API key. Enter it in the desktop app (Question bank tab).' });
   const text = String(req.body?.text || '').trim();
   if (text.length < 20) return res.status(400).json({ error: 'No readable text found in the file.' });
-  try {
-    const { questions } = await extractMcqs({ apiKey, model: MODEL, text });
-    res.json({ questions, count: questions.length });
-  } catch (e) { res.status(502).json({ error: e.message }); }
+
+  const jobId = crypto.randomUUID();
+  jobs.set(jobId, { status: 'running', kind: 'extract', chunk: 0, chunks: 0, found: 0 });
+  (async () => {
+    try {
+      const { questions } = await extractMcqs({
+        apiKey, model: MODEL, text,
+        onProgress: (p) => jobs.set(jobId, { ...jobs.get(jobId), ...p, status: 'running' }),
+      });
+      jobs.set(jobId, { status: 'ready', kind: 'extract', questions, count: questions.length });
+    } catch (e) { jobs.set(jobId, { ...jobs.get(jobId), status: 'error', error: e.message }); }
+  })();
+  res.json({ jobId });
 });
 
 // ============ Admin: students roster ============

@@ -237,18 +237,25 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
 
   function saveKey() { settings.saveClaudeKey(claudeKey.trim()); setKeyMsg('Saved on this computer.'); setTimeout(() => setKeyMsg(''), 2500); }
 
-  // Upload a PDF that already contains MCQs → Claude structures them → into the import box.
+  // Upload a PDF that already contains MCQs → Claude structures them (background job) → into the import box.
   async function onMcqPdf(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]; if (!f) return;
-    if (!settings.claudeKey()) { setError('Save your Claude API key first (in the section above).'); if (mcqPdfRef.current) mcqPdfRef.current.value = ''; return; }
-    setError(''); setImportMsg('Reading PDF and extracting MCQs with Claude… (may take a moment)');
+    if (mcqPdfRef.current) mcqPdfRef.current.value = '';
+    if (!settings.claudeKey()) { setError('Save your Claude API key first (in the section above).'); return; }
+    setError(''); setImportMsg('Reading PDF…');
     try {
       const text = await extractPdfText(f);
-      const r = await api.post<{ questions: any[]; count: number }>('/api/admin/parse-mcqs', { text, apiKey: settings.claudeKey() });
-      setImportText(JSON.stringify(r.questions, null, 2));
-      setImportMsg(`Extracted ${r.count} MCQ(s) from "${f.name}" — review below, then Import.`);
+      if (text.trim().length < 20) { setError('No readable text found in that PDF (it may be scanned images).'); setImportMsg(''); return; }
+      setImportMsg('Extracting MCQs with Claude…');
+      const { jobId } = await api.post<{ jobId: string }>('/api/admin/parse-mcqs', { text, apiKey: settings.claudeKey() });
+      const poll = async () => {
+        const j = await api.get<{ status: string; chunk?: number; chunks?: number; found?: number; questions?: any[]; count?: number; error?: string }>(`/api/admin/jobs/${jobId}`);
+        if (j.status === 'running') { setImportMsg(`Extracting with Claude… part ${j.chunk || 0}/${j.chunks || '?'} (${j.found || 0} found)`); setTimeout(poll, 1500); }
+        else if (j.status === 'ready') { setImportText(JSON.stringify(j.questions || [], null, 2)); setImportMsg(`Extracted ${j.count} MCQ(s) from "${f.name}" — review below, then Import.`); }
+        else { setError('Extract failed: ' + (j.error || 'unknown error')); setImportMsg(''); }
+      };
+      poll();
     } catch (err: any) { setError('Extract failed: ' + err.message); setImportMsg(''); }
-    finally { if (mcqPdfRef.current) mcqPdfRef.current.value = ''; }
   }
 
   // Upload an MCQ file (.json or .csv) into the import box.
