@@ -22,8 +22,9 @@ export default function Result() {
   const reg = sessionStorage.getItem('kl_reg') || '';
   const branch = sessionStorage.getItem('kl_branch') || '';
   const section = sessionStorage.getItem('kl_section') || '';
+  const domain = sessionStorage.getItem('kl_domain') || '';
   const today = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
-  const back = () => { ['kl_reg', 'kl_name', 'kl_branch', 'kl_section'].forEach((k) => sessionStorage.removeItem(k)); navigate('/'); };
+  const back = () => { ['kl_reg', 'kl_name', 'kl_branch', 'kl_section', 'kl_domain'].forEach((k) => sessionStorage.removeItem(k)); navigate('/'); };
 
   useEffect(() => {
     api.get<ResultData>(`/api/result/${attemptId}`).then(setData).catch((e) => setError(e.message));
@@ -64,7 +65,7 @@ export default function Result() {
             {branch && <>Branch <b className="text-slate-700">{branch}</b></>}{section && <> · Section <b className="text-slate-700">{section}</b></>}{reg && <> · Reg. No <b className="text-slate-700">{reg}</b></>}
           </p>
           <p className="mx-auto mt-4 max-w-lg text-sm leading-relaxed text-slate-600">
-            has successfully completed the <b>KL AI QuizApp</b> online examination on {today}, achieving the result below.
+            has successfully completed the <b>KL AI QuizApp{domain ? ` — ${domain}` : ''}</b> online examination on {today}, achieving the result below.
           </p>
 
           <div className="mx-auto mt-5 flex max-w-sm items-stretch justify-center gap-3">

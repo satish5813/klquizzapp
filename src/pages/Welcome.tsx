@@ -84,6 +84,7 @@ export default function Welcome() {
           <Row label="Registration No." value={s.registrationNumber} />
           <Row label="Branch" value={s.branch || '—'} />
           <Row label="Section" value={s.section || '—'} />
+          <Row label="Exam Domain" value={s.domain || '—'} />
         </div>
         <div className="grid grid-cols-2 gap-px bg-white/10">
           <Tile big={`${data.quizSize}`} small="Questions" />

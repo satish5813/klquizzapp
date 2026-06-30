@@ -28,6 +28,7 @@ export default function Login() {
       sessionStorage.setItem('kl_name', r.student.name || '');
       sessionStorage.setItem('kl_branch', r.student.branch || '');
       sessionStorage.setItem('kl_section', r.student.section || '');
+      sessionStorage.setItem('kl_domain', r.student.domain || '');
       navigate('/welcome');
     } catch (err: any) { setError(err.message); setBusy(false); }
   }

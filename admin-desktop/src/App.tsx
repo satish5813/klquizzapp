@@ -14,7 +14,7 @@ export default function App() {
 
   const [tab, setTab] = useState<Tab>('overview');
   const [error, setError] = useState('');
-  const [bank, setBank] = useState<{ count: number; topics: string[] }>({ count: 0, topics: [] });
+  const [bank, setBank] = useState<{ count: number; topics: string[]; byDomain?: Record<string, number> }>({ count: 0, topics: [] });
   const [studentStats, setStudentStats] = useState({ total: 0, active: 0, inactive: 0 });
   const [attempts, setAttempts] = useState<Attempt[]>([]);
 
@@ -22,7 +22,7 @@ export default function App() {
     setError('');
     try {
       const [b, sc, a] = await Promise.all([
-        api.get<{ count: number; topics: string[] }>('/api/admin/bank/stats'),
+        api.get<{ count: number; topics: string[]; byDomain?: Record<string, number> }>('/api/admin/bank/stats'),
         api.get<StudentsPage>('/api/admin/students?pageSize=1'),
         api.get<Attempt[]>('/api/admin/attempts'),
       ]);
@@ -136,14 +136,15 @@ function StatusBadge({ status, reason }: { status: string; reason?: string }) {
   return <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>{status}{reason ? ` · ${reason}` : ''}</span>;
 }
 
-// Parse a roster from CSV or JSON into [{registrationNumber,name,branch,section}].
-function parseRoster(text: string): { registrationNumber: string; name: string; branch: string; section: string }[] {
+// Parse a roster from CSV or JSON into [{registrationNumber,name,branch,section,domain}].
+function parseRoster(text: string): { registrationNumber: string; name: string; branch: string; section: string; domain: string }[] {
   const t = text.trim();
   if (t.startsWith('[')) {
     const arr = JSON.parse(t);
     return arr.map((s: any) => ({
       registrationNumber: String(s.registrationNumber ?? s.regNo ?? s.roll ?? s.rollNumber ?? '').trim(),
       name: String(s.name ?? '').trim(), branch: String(s.branch ?? '').trim(), section: String(s.section ?? '').trim(),
+      domain: String(s.domain ?? s.hackathonDomain ?? '').trim(),
     }));
   }
   const lines = t.split(/\r?\n/).filter((l) => l.trim());
@@ -153,10 +154,11 @@ function parseRoster(text: string): { registrationNumber: string; name: string; 
   let iReg = find('registrationnumber', 'regno', 'roll', 'rollnumber', 'registration_number', 'registration number', 'reg. no', 'reg no');
   let iName = find('name', 'studentname', 'student name');
   let iBranch = find('branch'); let iSec = find('section', 'sec');
+  const iDom = find('domain', 'hackathon domain', 'hackathondomain');
   let body = lines;
   if (iReg >= 0 || iName >= 0) body = lines.slice(1); // had a header row
   else { iReg = 0; iName = 1; iBranch = 2; iSec = 3; } // no header → assume column order
-  return body.map((l) => { const c = cells(l); return { registrationNumber: c[iReg] || '', name: c[iName] || '', branch: iBranch >= 0 ? c[iBranch] || '' : '', section: iSec >= 0 ? c[iSec] || '' : '' }; });
+  return body.map((l) => { const c = cells(l); return { registrationNumber: c[iReg] || '', name: c[iName] || '', branch: iBranch >= 0 ? c[iBranch] || '' : '', section: iSec >= 0 ? c[iSec] || '' : '', domain: iDom >= 0 ? c[iDom] || '' : '' }; });
 }
 
 // ---------------- User management (roster import + search/paginate + active + edit) ----------------
@@ -190,7 +192,7 @@ function UsersTab({ attempts, onChanged, setError }: { attempts: Attempt[]; onCh
   }
   async function saveEdit() {
     if (!edit) return;
-    try { await api.post(`/api/admin/students/${edit.id}`, { name: edit.name, branch: edit.branch, section: edit.section }); setEdit(null); refresh(); }
+    try { await api.post(`/api/admin/students/${edit.id}`, { name: edit.name, branch: edit.branch, section: edit.section, domain: edit.domain || '' }); setEdit(null); refresh(); }
     catch (e: any) { setError(e.message); }
   }
   async function reopen(a: Attempt) {
@@ -249,7 +251,7 @@ function UsersTab({ attempts, onChanged, setError }: { attempts: Attempt[]; onCh
       {/* table */}
       <div className="card overflow-x-auto p-0">
         <table className="w-full text-sm">
-          <thead className="border-b border-slate-100 bg-slate-50"><tr>{['Reg. No', 'Name', 'Branch', 'Section', 'Status', 'Attempt', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}</tr></thead>
+          <thead className="border-b border-slate-100 bg-slate-50"><tr>{['Reg. No', 'Name', 'Branch', 'Section', 'Domain', 'Status', 'Attempt', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}</tr></thead>
           <tbody>
             {data?.rows.map((s) => {
               const a = byReg.get(s.registrationNumber);
@@ -260,6 +262,7 @@ function UsersTab({ attempts, onChanged, setError }: { attempts: Attempt[]; onCh
                   <td className="td font-medium">{s.name}</td>
                   <td className="td">{s.branch}</td>
                   <td className="td">{s.section || '—'}</td>
+                  <td className="td">{s.domain ? <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700">{s.domain}</span> : <span className="text-slate-300">—</span>}</td>
                   <td className="td"><span className={`rounded-full px-2 py-0.5 text-xs font-medium ${active ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-600'}`}>{active ? 'active' : 'inactive'}</span></td>
                   <td className="td">{a ? <StatusBadge status={a.status} reason={a.reason} /> : <span className="text-slate-400">none</span>}</td>
                   <td className="td whitespace-nowrap">
@@ -270,7 +273,7 @@ function UsersTab({ attempts, onChanged, setError }: { attempts: Attempt[]; onCh
                 </tr>
               );
             })}
-            {data && !data.rows.length && <tr><td className="td text-slate-400" colSpan={7}>No students match.</td></tr>}
+            {data && !data.rows.length && <tr><td className="td text-slate-400" colSpan={8}>No students match.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -297,6 +300,7 @@ function UsersTab({ attempts, onChanged, setError }: { attempts: Attempt[]; onCh
               <div><label className="label">Branch</label><input className="input" value={edit.branch} onChange={(e) => setEdit({ ...edit, branch: e.target.value })} /></div>
               <div><label className="label">Section</label><input className="input" value={edit.section || ''} onChange={(e) => setEdit({ ...edit, section: e.target.value })} /></div>
             </div>
+            <div><label className="label">Hackathon Domain</label><input className="input" value={edit.domain || ''} onChange={(e) => setEdit({ ...edit, domain: e.target.value })} placeholder="e.g. Java Core / Python" /></div>
             <button className="btn-primary w-full" onClick={saveEdit}>Save changes</button>
           </div>
         </div>
@@ -308,10 +312,11 @@ function UsersTab({ attempts, onChanged, setError }: { attempts: Attempt[]; onCh
 // ---------------- Question bank (generate → preview → post + import) ----------------
 interface GenQ { question: string; options: string[]; answerIndex: number; topic: string; difficulty: string; explanation?: string; }
 interface Job { jobId?: string; status: string; collected: number; target: number; requests: number; error?: string; stats?: any; bankTotal?: number; questions?: GenQ[] }
-function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics: string[] }; onChanged: () => void; setError: (s: string) => void }) {
+function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics: string[]; byDomain?: Record<string, number> }; onChanged: () => void; setError: (s: string) => void }) {
   const [syllabus, setSyllabus] = useState('');
   const [count, setCount] = useState('1000');
   const [replace, setReplace] = useState(false);
+  const [domain, setDomain] = useState(localStorage.getItem('kl_gen_domain') || 'Java Core');
   const [est, setEst] = useState<any>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
@@ -384,7 +389,7 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
     if (!settings.claudeKey()) { setError('Enter and save your Claude API key first (below).'); return; }
     setBusy(true); setJob(null); setError('');
     try {
-      const { jobId } = await api.post<{ jobId: string }>('/api/admin/generate', { syllabus, count: Number(count), replace, apiKey: settings.claudeKey() });
+      const { jobId } = await api.post<{ jobId: string }>('/api/admin/generate', { syllabus, count: Number(count), replace, domain: domain.trim(), apiKey: settings.claudeKey() });
       const poll = async () => {
         const j = await api.get<Job>(`/api/admin/jobs/${jobId}`);
         setJob({ ...j, jobId });
@@ -410,14 +415,32 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
     try { parsed = JSON.parse(importText); } catch { setError('Import must be valid JSON (an array of MCQs).'); return; }
     const questions = Array.isArray(parsed) ? parsed : parsed.questions;
     try {
-      const r = await api.post<{ added: number; skipped: number; bankTotal: number }>('/api/admin/import', { questions, replace });
+      const r = await api.post<{ added: number; skipped: number; bankTotal: number }>('/api/admin/import', { questions, replace, domain: domain.trim() });
       setImportMsg(`Imported ${r.added}, skipped ${r.skipped}. Bank total: ${r.bankTotal}.`); setImportText(''); onChanged();
     } catch (e: any) { setError(e.message); }
   }
 
   return (
     <div className="space-y-4">
-      <div className="card"><p className="text-sm text-slate-500">Question bank</p><p className="text-3xl font-bold">{bank.count}</p></div>
+      <div className="card">
+        <p className="text-sm text-slate-500">Question bank</p>
+        <p className="text-3xl font-bold">{bank.count}</p>
+        {bank.byDomain && Object.keys(bank.byDomain).length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {Object.entries(bank.byDomain).map(([d, n]) => (
+              <span key={d} className="rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700">{d}: {n}</span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Domain — questions are tagged with this; each student gets their own domain's questions */}
+      <div className="card space-y-2">
+        <h2 className="font-semibold">Exam domain</h2>
+        <p className="text-xs text-slate-500">Questions you generate / import below are tagged with this domain. A student only gets questions from <b>their</b> Hackathon Domain (e.g. <code>Java Core</code>, <code>Python</code>).</p>
+        <input className="input max-w-xs" value={domain} onChange={(e) => { setDomain(e.target.value); localStorage.setItem('kl_gen_domain', e.target.value); }} placeholder="e.g. Java Core" list="domain-list" />
+        <datalist id="domain-list">{Object.keys(bank.byDomain || {}).map((d) => <option key={d} value={d} />)}</datalist>
+      </div>
 
       <div className="card space-y-2">
         <h2 className="font-semibold">Claude API key</h2>
@@ -430,7 +453,7 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
       </div>
 
       <div className="card space-y-3">
-        <h2 className="font-semibold">Generate from syllabus (Claude Haiku)</h2>
+        <h2 className="font-semibold">Generate from syllabus (Claude Haiku) <span className="ml-1 rounded bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700">domain: {domain || '(none)'}</span></h2>
         <div className="flex items-center gap-2">
           <span className="text-xs text-slate-500">Paste the syllabus below, or</span>
           <input ref={fileRef} type="file" accept="application/pdf" className="hidden" onChange={onPdf} />
@@ -477,7 +500,7 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
       )}
 
       <div className="card space-y-3">
-        <h2 className="font-semibold">Import ready-made MCQs</h2>
+        <h2 className="font-semibold">Import ready-made MCQs <span className="ml-1 rounded bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700">domain: {domain || '(none)'}</span></h2>
         <p className="text-xs text-slate-500">Upload a <b>.json</b> or <b>.csv</b> file, or paste below. JSON: array of <code>{`{"question","options":[4],"answerIndex"}`}</code> (or use <code>"answer":"B"</code>/option text). CSV header: <code>question,a,b,c,d,answer</code>.</p>
         <div className="flex flex-wrap items-center gap-2">
           <input ref={mcqFileRef} type="file" accept=".json,.csv,text/csv,application/json" className="hidden" onChange={onMcqFile} />

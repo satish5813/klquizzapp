@@ -42,7 +42,7 @@ export const jsonDb = {
       const cur = read('students');
       const i = cur.findIndex((s) => s.id === id);
       if (i === -1) return null;
-      const allow = ['name', 'branch', 'section', 'active'];
+      const allow = ['name', 'branch', 'section', 'domain', 'active'];
       for (const k of allow) if (k in patch) cur[i][k] = patch[k];
       write('students', cur);
       return cur[i];
@@ -54,7 +54,7 @@ export const jsonDb = {
       let added = 0, updated = 0;
       for (const r of rows) {
         const existing = idx.get(r.registrationNumber);
-        if (existing) { Object.assign(existing, { name: r.name, branch: r.branch, section: r.section }); updated++; }
+        if (existing) { Object.assign(existing, { name: r.name, branch: r.branch, section: r.section, domain: r.domain }); updated++; }
         else { cur.push({ ...r, active: true }); idx.set(r.registrationNumber, r); added++; }
       }
       write('students', cur);

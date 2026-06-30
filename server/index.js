@@ -23,6 +23,8 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 const pct = (score, total) => Math.round(((score ?? 0) / total) * 100);
+// Normalize a domain label so "Java Core", "JavaCore", "java core" all match.
+const normDomain = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 // In-memory question bank cache — avoids a full questions read on every
 // start/quiz/submit, so the API scales to thousands of concurrent students.
@@ -42,7 +44,9 @@ app.get('/api/health', (_req, res) =>
 // ============ Admin: bank ============
 app.get('/api/admin/bank/stats', requireAdmin, async (_req, res) => {
   const qs = await db.questions.all();
-  res.json({ count: qs.length, topics: [...new Set(qs.map((q) => q.topic))].slice(0, 40) });
+  const byDomain = {};
+  for (const q of qs) { const d = q.domain || '(none)'; byDomain[d] = (byDomain[d] || 0) + 1; }
+  res.json({ count: qs.length, topics: [...new Set(qs.map((q) => q.topic))].slice(0, 40), byDomain });
 });
 
 app.post('/api/admin/estimate', requireAdmin, (req, res) => {
@@ -57,10 +61,11 @@ app.post('/api/admin/generate', requireAdmin, async (req, res) => {
   const syllabus = String(req.body?.syllabus || '').trim();
   const count = Math.max(1, Math.min(50000, Number(req.body?.count) || 1000));
   const replace = !!req.body?.replace;
+  const domain = String(req.body?.domain || '').trim();
   if (syllabus.length < 10) return res.status(400).json({ error: 'Provide a syllabus (min 10 chars)' });
 
   const jobId = crypto.randomUUID();
-  jobs.set(jobId, { status: 'running', collected: 0, target: count, requests: 0, replace });
+  jobs.set(jobId, { status: 'running', collected: 0, target: count, requests: 0, replace, domain });
   (async () => {
     try {
       const { questions, stats } = await generateBank({
@@ -68,8 +73,9 @@ app.post('/api/admin/generate', requireAdmin, async (req, res) => {
         existingNorms: await db.questions.normSet(),
         onProgress: (p) => jobs.set(jobId, { ...jobs.get(jobId), ...p, status: 'running' }),
       });
+      questions.forEach((q) => { q.domain = domain; }); // tag with the exam domain
       // Hold for PREVIEW — do not save until the admin posts/publishes.
-      jobs.set(jobId, { status: 'ready', collected: questions.length, target: count, requests: stats.requests, stats, replace, questions });
+      jobs.set(jobId, { status: 'ready', collected: questions.length, target: count, requests: stats.requests, stats, replace, domain, questions });
     } catch (e) { jobs.set(jobId, { ...jobs.get(jobId), status: 'error', error: e.message }); }
   })();
   res.json({ jobId });
@@ -126,6 +132,7 @@ app.post('/api/admin/schedule', requireAdmin, async (req, res) => {
 app.post('/api/admin/import', requireAdmin, async (req, res) => {
   const raw = Array.isArray(req.body?.questions) ? req.body.questions : null;
   if (!raw) return res.status(400).json({ error: 'Body must be { questions: [...] }' });
+  const domain = String(req.body?.domain || '').trim();
   if (req.body?.replace) await db.questions.clear();
   const seen = await db.questions.normSet();
   const toAdd = [], errors = [];
@@ -146,7 +153,7 @@ app.post('/api/admin/import', requireAdmin, async (req, res) => {
     const norm = normalizeQuestion(question);
     if (!norm || seen.has(norm)) { errors.push({ row: i + 1, reason: 'duplicate' }); return; }
     seen.add(norm);
-    toAdd.push({ id: crypto.randomUUID(), question, options, answerIndex, topic: q.topic || 'General', difficulty: (q.difficulty || 'MEDIUM').toUpperCase(), explanation: q.explanation || '', norm });
+    toAdd.push({ id: crypto.randomUUID(), question, options, answerIndex, topic: q.topic || 'General', difficulty: (q.difficulty || 'MEDIUM').toUpperCase(), explanation: q.explanation || '', domain, norm });
   });
   await db.questions.addMany(toAdd);
   invalidateBank();
@@ -186,8 +193,9 @@ app.post('/api/admin/students/import', requireAdmin, async (req, res) => {
     const name = String(s.name ?? '').trim();
     const branch = String(s.branch ?? '').trim();
     const section = String(s.section ?? '').trim();
+    const domain = String(s.domain ?? '').trim();
     if (!registrationNumber || !name) { errors.push({ row: i + 1, reason: 'need registrationNumber and name' }); return; }
-    rows.push({ id: crypto.randomUUID(), registrationNumber, name, branch, section, createdAt: new Date().toISOString() });
+    rows.push({ id: crypto.randomUUID(), registrationNumber, name, branch, section, domain, createdAt: new Date().toISOString() });
   });
   const r = await db.students.importMany(rows);
   res.json({ ...r, skipped: errors.length, errors: errors.slice(0, 50) });
@@ -290,7 +298,7 @@ app.post('/api/login', async (req, res) => {
   const done = mine.find((a) => a.status === 'submitted' || a.status === 'terminated');
   const inProgress = mine.find((a) => a.status === 'in_progress');
   res.json({
-    student: { registrationNumber: student.registrationNumber, name: student.name, branch: student.branch, section: student.section },
+    student: { registrationNumber: student.registrationNumber, name: student.name, branch: student.branch, section: student.section, domain: student.domain || '' },
     attempt: done ? { state: 'completed', attemptId: done.id, status: done.status, score: done.score ?? 0, total: done.total, percentage: pct(done.score, done.total) }
       : inProgress ? { state: 'in_progress', attemptId: inProgress.id } : { state: 'none' },
     quizSize: QUIZ_SIZE, durationMin: QUIZ_DURATION_MIN, schedule: await scheduleStatus(),
@@ -303,8 +311,6 @@ app.post('/api/exam/start', async (req, res) => {
   const student = await db.students.byRegNo(registrationNumber);
   if (!student) return res.status(404).json({ error: 'Registration number not found.' });
   if (student.active === false) return res.status(403).json({ error: 'Your account is deactivated. Please contact the exam coordinator.' });
-  const bank = (await getBank()).list;
-  if (!bank.length) return res.status(400).json({ error: 'No questions available yet. Please contact the coordinator.' });
   const mine = await db.attempts.byStudent(student.id);
   const done = mine.find((a) => a.status === 'submitted' || a.status === 'terminated');
   if (done) return res.json({ completed: true, attemptId: done.id });
@@ -318,8 +324,16 @@ app.post('/api/exam/start', async (req, res) => {
       : 'The exam window has closed.',
     schedule: sch,
   });
-  const size = Math.min(QUIZ_SIZE, bank.length);
-  const picked = shuffle(bank).slice(0, size);
+  // Domain-specific: a student only gets questions from their Hackathon Domain.
+  const sd = normDomain(student.domain);
+  const pool = (await getBank()).list.filter((q) => normDomain(q.domain) === sd);
+  if (!pool.length) return res.status(400).json({
+    error: student.domain
+      ? `No questions are available yet for your domain "${student.domain}". Please contact the coordinator.`
+      : 'No exam domain is assigned to you. Please contact the coordinator.',
+  });
+  const size = Math.min(QUIZ_SIZE, pool.length);
+  const picked = shuffle(pool).slice(0, size);
   const attempt = await db.attempts.add({
     id: crypto.randomUUID(), studentId: student.id, questionIds: picked.map((q) => q.id),
     answers: {}, score: null, total: size, status: 'in_progress', reason: '', startedAt: new Date().toISOString(), submittedAt: null,
