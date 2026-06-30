@@ -65,7 +65,12 @@ export default function Welcome() {
   }
 
   return (
-    <div className="grid gap-5 md:grid-cols-[320px_1fr]">
+    <div className="space-y-3">
+      <button onClick={() => { sessionStorage.removeItem('kl_reg'); navigate('/'); }}
+        className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-teal-700">
+        ← Back to login
+      </button>
+      <div className="grid gap-5 md:grid-cols-[320px_1fr]">
       {/* LEFT: teal profile panel */}
       <aside className="overflow-hidden rounded-3xl bg-gradient-to-b from-teal-600 to-emerald-600 text-white shadow-lg">
         <div className="px-6 pt-7 text-center">
@@ -111,6 +116,7 @@ export default function Welcome() {
           {busy ? 'Starting…' : a.state === 'in_progress' ? 'Resume Exam in Full Screen' : 'Start Exam in Full Screen'}
         </button>
       </section>
+      </div>
     </div>
   );
 }

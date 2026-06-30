@@ -1,13 +1,18 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { api, ReviewItem } from '../api';
 
 interface ResultData { score: number; total: number; percentage: number; status: string; terminated: boolean; reason: string; review: ReviewItem[]; }
 
 export default function Result() {
   const { attemptId } = useParams();
+  const navigate = useNavigate();
   const [data, setData] = useState<ResultData | null>(null);
   const [error, setError] = useState('');
+  const back = () => { sessionStorage.removeItem('kl_reg'); navigate('/'); };
+  const BackBtn = () => (
+    <button onClick={back} className="mt-4 rounded-xl bg-teal-600 px-6 py-2.5 font-semibold text-white shadow-sm transition hover:bg-teal-700">← Back to Login</button>
+  );
 
   useEffect(() => {
     api.get<ResultData>(`/api/result/${attemptId}`).then(setData).catch((e) => setError(e.message));
@@ -25,7 +30,7 @@ export default function Result() {
           Your exam was ended due to a full-screen / focus violation ({data.reason}). It is recorded as <b>0 marks</b>.
         </p>
         <p className="my-3 text-5xl font-bold text-red-700">0 / {data.total}</p>
-        <Link to="/" className="btn-ghost">Back to start</Link>
+        <BackBtn />
       </div>
     );
   }
@@ -36,7 +41,7 @@ export default function Result() {
         <p className="text-sm text-slate-500">Your score</p>
         <p className="my-1 text-5xl font-bold text-brand-700">{data.percentage}%</p>
         <p className="text-slate-600">{data.score} / {data.total} correct</p>
-        <Link to="/" className="btn-ghost mt-4">Done</Link>
+        <BackBtn />
       </div>
       <p className="text-sm font-semibold text-slate-700">Review</p>
       <div className="space-y-3">

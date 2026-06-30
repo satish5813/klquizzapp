@@ -232,8 +232,35 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
   const [claudeKey, setClaudeKey] = useState(settings.claudeKey());
   const [keyMsg, setKeyMsg] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
+  const mcqFileRef = useRef<HTMLInputElement>(null);
 
   function saveKey() { settings.saveClaudeKey(claudeKey.trim()); setKeyMsg('Saved on this computer.'); setTimeout(() => setKeyMsg(''), 2500); }
+
+  // Upload an MCQ file (.json or .csv) into the import box.
+  async function onMcqFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]; if (!f) return;
+    setError(''); setImportMsg('');
+    try {
+      const raw = await f.text();
+      if (f.name.toLowerCase().endsWith('.csv')) {
+        const lines = raw.split(/\r?\n/).filter((l) => l.trim());
+        const head = lines[0].split(',').map((h) => h.trim().toLowerCase());
+        const col = (...names: string[]) => head.findIndex((h) => names.includes(h));
+        const iQ = col('question', 'q'); const iA = col('a', 'optiona', 'option1', 'opt1');
+        const iB = col('b', 'optionb', 'option2', 'opt2'); const iC = col('c', 'optionc', 'option3', 'opt3');
+        const iD = col('d', 'optiond', 'option4', 'opt4'); const iAns = col('answer', 'correct', 'ans', 'key');
+        const cells = (l: string) => l.split(',').map((c) => c.trim().replace(/^"|"$/g, ''));
+        const arr = lines.slice(1).map((l) => { const c = cells(l); return { question: c[iQ], options: [c[iA], c[iB], c[iC], c[iD]], answer: c[iAns], topic: 'General' }; })
+          .filter((x) => x.question && x.options.every(Boolean));
+        setImportText(JSON.stringify(arr, null, 2));
+        setImportMsg(`Loaded ${arr.length} MCQ(s) from CSV — review, then Import.`);
+      } else {
+        setImportText(raw.trim());
+        setImportMsg(`Loaded "${f.name}" — review, then Import.`);
+      }
+    } catch (err: any) { setError('Could not read file: ' + err.message); }
+    finally { if (mcqFileRef.current) mcqFileRef.current.value = ''; }
+  }
   async function onPdf(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]; if (!f) return;
     setPdfMsg('Reading PDF…'); setError('');
@@ -339,8 +366,12 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
       )}
 
       <div className="card space-y-3">
-        <h2 className="font-semibold">Import model MCQs (JSON)</h2>
-        <p className="text-xs text-slate-500">Array of <code>{`{"question","options":[4],"answerIndex"}`}</code>. You can use <code>"answer":"B"</code> or the option text instead of <code>answerIndex</code>; add <code>topic</code>, <code>difficulty</code>, <code>explanation</code> optionally.</p>
+        <h2 className="font-semibold">Import ready-made MCQs</h2>
+        <p className="text-xs text-slate-500">Upload a <b>.json</b> or <b>.csv</b> file, or paste below. JSON: array of <code>{`{"question","options":[4],"answerIndex"}`}</code> (or use <code>"answer":"B"</code>/option text). CSV header: <code>question,a,b,c,d,answer</code>.</p>
+        <div className="flex items-center gap-2">
+          <input ref={mcqFileRef} type="file" accept=".json,.csv,text/csv,application/json" className="hidden" onChange={onMcqFile} />
+          <button className="btn-ghost" onClick={() => mcqFileRef.current?.click()}>📎 Upload MCQ file (.json / .csv)</button>
+        </div>
         <textarea className="input min-h-[110px] font-mono text-xs" value={importText} onChange={(e) => setImportText(e.target.value)} placeholder='[ { "question": "...", "options": ["...","...","...","..."], "answerIndex": 0 } ]' />
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} /> Replace bank</label>

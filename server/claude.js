@@ -53,19 +53,24 @@ const MCQ_SCHEMA = {
 
 function buildPrompt(syllabus, n, avoidTopics) {
   return [
-    `You are an exam question author. Generate exactly ${n} multiple-choice questions (MCQs)`,
-    `STRICTLY within this syllabus — do not go beyond it:`,
+    `You are a senior university examiner writing a PROFESSIONAL, exam-quality test.`,
+    `Generate exactly ${n} multiple-choice questions (MCQs) STRICTLY within this syllabus/source — do not go beyond it:`,
     `"""`,
     syllabus.trim(),
     `"""`,
     ``,
-    `Rules:`,
-    `- Each MCQ has exactly 4 options and exactly one correct answer (answerIndex 0-3).`,
-    `- Spread questions across different topics and a mix of EASY/MEDIUM/HARD difficulty.`,
-    `- Make them distinct from one another; do not paraphrase the same question.`,
-    `- Keep each explanation to one short sentence.`,
+    `Quality standards (professional level):`,
+    `- Test real understanding and application, not trivial recall or trick wording.`,
+    `- Each MCQ has exactly 4 options and exactly ONE unambiguously correct answer (answerIndex 0-3).`,
+    `- The 3 distractors must be plausible and related (common misconceptions), not obviously wrong or joke options.`,
+    `- Keep options similar in length and style; avoid "All/None of the above" and avoid grammatical give-aways.`,
+    `- Use clear, precise, professional language. Self-contained questions (no "refer to above").`,
+    `- Spread across the syllabus topics with a balanced mix of EASY / MEDIUM / HARD.`,
+    `- Every question must be distinct — do not paraphrase or repeat the same idea.`,
+    `- "explanation" = one concise sentence justifying the correct answer.`,
+    `- Set "topic" to the specific concept each question covers.`,
     avoidTopics && avoidTopics.length
-      ? `- Favor topics not yet covered, e.g.: ${avoidTopics.slice(0, 12).join(', ')}.`
+      ? `- Prefer topics not yet covered, e.g.: ${avoidTopics.slice(0, 12).join(', ')}.`
       : ``,
     `Return only the JSON object matching the schema.`,
   ]
