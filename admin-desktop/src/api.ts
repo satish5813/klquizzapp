@@ -2,11 +2,15 @@
 // Base URL + admin token are configurable and persisted locally.
 const LS_BASE = 'kl_admin_base';
 const LS_TOKEN = 'kl_admin_token';
+const LS_CLAUDE = 'kl_claude_key';
 
 export const settings = {
   base: () => localStorage.getItem(LS_BASE) || 'http://localhost:4000',
   token: () => localStorage.getItem(LS_TOKEN) || '',
   save: (base: string, token: string) => { localStorage.setItem(LS_BASE, base); localStorage.setItem(LS_TOKEN, token); },
+  // Claude API key — stored locally on this machine only, sent to your own server for generation.
+  claudeKey: () => localStorage.getItem(LS_CLAUDE) || '',
+  saveClaudeKey: (k: string) => localStorage.setItem(LS_CLAUDE, k),
 };
 
 async function req<T>(path: string, init: RequestInit = {}, auth = true): Promise<T> {

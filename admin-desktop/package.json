@@ -5,7 +5,7 @@
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -k -n vite,electron -c cyan,magenta \"vite --port 5190 --strictPort\" \"wait-on tcp:127.0.0.1:5190 && electron electron/main.cjs\"",
+    "dev": "concurrently -k -n vite,electron -c cyan,magenta \"vite --port 5190 --strictPort --host 127.0.0.1\" \"wait-on tcp:127.0.0.1:5190 && electron electron/main.cjs\"",
     "build": "tsc --noEmit && vite build",
     "start": "electron electron/main.cjs",
     "dist": "vite build && electron-builder"
@@ -13,11 +13,19 @@
   "build": {
     "appId": "edu.kl.quizadmin",
     "productName": "KL AI Quiz Admin",
-    "files": ["dist/**", "electron/**"],
-    "directories": { "output": "release" },
-    "win": { "target": "nsis" }
+    "files": [
+      "dist/**",
+      "electron/**"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": "nsis"
+    }
   },
   "dependencies": {
+    "pdfjs-dist": "^4.10.38",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

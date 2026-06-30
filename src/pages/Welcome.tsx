@@ -28,6 +28,9 @@ export default function Welcome() {
 
   const s = data.student;
   const a = data.attempt;
+  const sch = data.schedule;
+  // Schedule blocks only NEW starts (someone already in progress may resume).
+  const blocked = a.state !== 'in_progress' && sch && sch.enabled && !sch.open;
 
   // Already completed — cannot reopen
   if (a.state === 'completed') {
@@ -40,6 +43,26 @@ export default function Welcome() {
         <p className={`my-3 text-4xl font-bold ${terminated ? 'text-red-700' : 'text-slate-800'}`}>{a.score} / {a.total}</p>
         <p className="text-sm text-slate-500">{terminated ? 'Recorded as 0 — the exam was terminated for a full-screen / focus violation.' : `Your recorded score (${a.percentage}%).`}</p>
         <button className="btn-ghost mt-4" onClick={() => { sessionStorage.removeItem('kl_reg'); navigate('/'); }}>Log out</button>
+      </div>
+    );
+  }
+
+  // Outside the scheduled window
+  if (blocked) {
+    return (
+      <div className="card mx-auto max-w-lg border-2 border-blue-200 text-center">
+        <p className="text-5xl">⏳</p>
+        <h1 className="mt-2 text-xl font-bold text-blue-700">{sch.reason === 'closed' ? 'Exam closed' : 'Exam not started yet'}</h1>
+        <p className="mt-1 text-sm text-slate-600">{s.name} · {s.registrationNumber}</p>
+        <p className="mt-3 text-sm text-slate-600">
+          {sch.reason === 'closed'
+            ? `The exam window closed${sch.endAt ? ' at ' + new Date(sch.endAt).toLocaleString() : ''}.`
+            : `The exam opens at ${sch.startAt ? new Date(sch.startAt).toLocaleString() : 'the scheduled time'}. Please come back then.`}
+        </p>
+        <div className="mt-4 flex justify-center gap-2">
+          <button className="btn-ghost" onClick={() => window.location.reload()}>Refresh</button>
+          <button className="btn-ghost" onClick={() => { sessionStorage.removeItem('kl_reg'); navigate('/'); }}>Log out</button>
+        </div>
       </div>
     );
   }

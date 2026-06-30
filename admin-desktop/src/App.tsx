@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, settings, Student, Attempt, QReport, ReviewItem } from './api';
+import { extractPdfText } from './pdf';
 
-type Tab = 'overview' | 'users' | 'bank' | 'results' | 'report';
+type Tab = 'overview' | 'users' | 'bank' | 'results' | 'report' | 'schedule';
 
 export default function App() {
   const [connected, setConnected] = useState(false);
@@ -60,7 +61,7 @@ export default function App() {
 
   const submitted = attempts.filter((a) => a.status === 'submitted').length;
   const terminated = attempts.filter((a) => a.status === 'terminated').length;
-  const tabs: [Tab, string][] = [['overview', 'Overview'], ['users', 'User management'], ['bank', 'Question bank'], ['results', 'Results'], ['report', 'Question report']];
+  const tabs: [Tab, string][] = [['overview', 'Overview'], ['users', 'User management'], ['bank', 'Question bank'], ['schedule', 'Schedule'], ['results', 'Results'], ['report', 'Question report']];
 
   return (
     <div className="min-h-screen">
@@ -97,6 +98,7 @@ export default function App() {
 
         {tab === 'users' && <UsersTab students={students} attempts={attempts} onChanged={loadAll} setError={setError} />}
         {tab === 'bank' && <BankTab bank={bank} onChanged={loadAll} setError={setError} />}
+        {tab === 'schedule' && <ScheduleTab setError={setError} />}
         {tab === 'results' && <ResultsTab attempts={attempts} onChanged={loadAll} setError={setError} />}
         {tab === 'report' && <ReportTab setError={setError} />}
       </main>
@@ -197,8 +199,9 @@ function UsersTab({ students, attempts, onChanged, setError }: { students: Stude
   );
 }
 
-// ---------------- Question bank (generate + import) ----------------
-interface Job { status: string; collected: number; target: number; requests: number; error?: string; stats?: any; bankTotal?: number; }
+// ---------------- Question bank (generate → preview → post + import) ----------------
+interface GenQ { question: string; options: string[]; answerIndex: number; topic: string; difficulty: string; explanation?: string; }
+interface Job { jobId?: string; status: string; collected: number; target: number; requests: number; error?: string; stats?: any; bankTotal?: number; questions?: GenQ[] }
 function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics: string[] }; onChanged: () => void; setError: (s: string) => void }) {
   const [syllabus, setSyllabus] = useState('');
   const [count, setCount] = useState('1000');
@@ -206,21 +209,45 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
   const [est, setEst] = useState<any>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pdfMsg, setPdfMsg] = useState('');
   const [importText, setImportText] = useState('');
   const [importMsg, setImportMsg] = useState('');
+  const [claudeKey, setClaudeKey] = useState(settings.claudeKey());
+  const [keyMsg, setKeyMsg] = useState('');
+  const fileRef = useRef<HTMLInputElement>(null);
 
+  function saveKey() { settings.saveClaudeKey(claudeKey.trim()); setKeyMsg('Saved on this computer.'); setTimeout(() => setKeyMsg(''), 2500); }
+  async function onPdf(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]; if (!f) return;
+    setPdfMsg('Reading PDF…'); setError('');
+    try { const text = await extractPdfText(f); setSyllabus(text); setPdfMsg(`Loaded "${f.name}" (${text.length.toLocaleString()} chars).`); }
+    catch (err: any) { setError('Could not read PDF: ' + err.message); setPdfMsg(''); }
+    finally { if (fileRef.current) fileRef.current.value = ''; }
+  }
   async function estimate() { try { setEst(await api.post('/api/admin/estimate', { count: Number(count) })); } catch (e: any) { setError(e.message); } }
   async function generate() {
+    if (!settings.claudeKey()) { setError('Enter and save your Claude API key first (below).'); return; }
     setBusy(true); setJob(null); setError('');
     try {
-      const { jobId } = await api.post<{ jobId: string }>('/api/admin/generate', { syllabus, count: Number(count), replace });
+      const { jobId } = await api.post<{ jobId: string }>('/api/admin/generate', { syllabus, count: Number(count), replace, apiKey: settings.claudeKey() });
       const poll = async () => {
         const j = await api.get<Job>(`/api/admin/jobs/${jobId}`);
-        setJob(j);
-        if (j.status === 'running') setTimeout(poll, 1500); else { setBusy(false); onChanged(); }
+        setJob({ ...j, jobId });
+        if (j.status === 'running') setTimeout(poll, 1500); else setBusy(false);
       };
       poll();
     } catch (e: any) { setError(e.message); setBusy(false); }
+  }
+  async function publish() {
+    if (!job?.jobId) return;
+    setBusy(true); setError('');
+    try { const r = await api.post<{ added: number; bankTotal: number }>(`/api/admin/generate/${job.jobId}/publish`); setJob({ ...job, status: 'published', bankTotal: r.bankTotal, questions: undefined }); onChanged(); }
+    catch (e: any) { setError(e.message); } finally { setBusy(false); }
+  }
+  async function discard() {
+    if (!job?.jobId) { setJob(null); return; }
+    try { await api.post(`/api/admin/generate/${job.jobId}/discard`); } catch { /* ignore */ }
+    setJob(null);
   }
   async function importMcqs() {
     setImportMsg(''); setError('');
@@ -237,22 +264,62 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
     <div className="space-y-4">
       <div className="card"><p className="text-sm text-slate-500">Question bank</p><p className="text-3xl font-bold">{bank.count}</p></div>
 
+      <div className="card space-y-2">
+        <h2 className="font-semibold">Claude API key</h2>
+        <p className="text-xs text-slate-500">Needed only to generate questions. Stored on <b>this computer</b> and sent to your server to call Claude — never shown to students. {settings.claudeKey() ? '✅ A key is currently saved.' : '⚠ No key saved yet.'}</p>
+        <div className="flex items-center gap-2">
+          <input className="input font-mono text-xs" type="password" value={claudeKey} onChange={(e) => setClaudeKey(e.target.value)} placeholder="sk-ant-..." />
+          <button className="btn-primary" disabled={!claudeKey.trim()} onClick={saveKey}>Save key</button>
+          {keyMsg && <span className="whitespace-nowrap text-sm text-green-700">{keyMsg}</span>}
+        </div>
+      </div>
+
       <div className="card space-y-3">
         <h2 className="font-semibold">Generate from syllabus (Claude Haiku)</h2>
-        <textarea className="input min-h-[110px]" value={syllabus} onChange={(e) => setSyllabus(e.target.value)} placeholder="Paste the syllabus / topics…" />
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-500">Paste the syllabus below, or</span>
+          <input ref={fileRef} type="file" accept="application/pdf" className="hidden" onChange={onPdf} />
+          <button className="btn-ghost" onClick={() => fileRef.current?.click()}>📄 Upload syllabus PDF</button>
+          {pdfMsg && <span className="text-xs text-green-700">{pdfMsg}</span>}
+        </div>
+        <textarea className="input min-h-[110px]" value={syllabus} onChange={(e) => setSyllabus(e.target.value)} placeholder="Paste the syllabus / topics… (or upload a PDF above)" />
         <div className="flex flex-wrap items-end gap-3">
           <div className="w-28"><label className="label">How many</label><input className="input" type="number" min={1} value={count} onChange={(e) => setCount(e.target.value)} /></div>
           <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} /> Replace bank</label>
           <button className="btn-ghost" onClick={estimate}>Estimate cost</button>
-          <button className="btn-primary" disabled={busy || syllabus.trim().length < 10} onClick={generate}>{busy ? 'Generating…' : 'Generate'}</button>
+          <button className="btn-primary" disabled={busy || syllabus.trim().length < 10} onClick={generate}>{busy ? 'Working…' : 'Generate'}</button>
         </div>
         {est && <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">~{est.requests} API calls · est. <b>${est.usd}</b> (≈ ₹{est.inr}). <span className="text-slate-400">{est.note}</span></div>}
-        {job && <div className={`rounded-lg px-3 py-2 text-sm ${job.status === 'error' ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-blue-700'}`}>
-          {job.status === 'running' && <>Generating… {job.collected}/{job.target} ({job.requests} calls)</>}
-          {job.status === 'done' && <>✅ Added {job.stats?.generated} (bank {job.bankTotal}). Actual ${job.stats?.actualUsd} (≈ ₹{job.stats?.actualInr}).</>}
-          {job.status === 'error' && <>Error: {job.error}</>}
-        </div>}
+        {job?.status === 'running' && <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">Generating… {job.collected}/{job.target} ({job.requests} calls)</div>}
+        {job?.status === 'error' && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">Error: {job.error}</div>}
+        {job?.status === 'published' && <div className="rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">✅ Posted to the exam. Bank now {job.bankTotal} questions.</div>}
       </div>
+
+      {/* PREVIEW → POST */}
+      {job?.status === 'ready' && job.questions && (
+        <div className="card space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold">Preview — {job.questions.length} question(s) generated</h2>
+            <div className="flex gap-2">
+              <button className="btn-ghost" onClick={discard}>Discard</button>
+              <button className="btn-primary" disabled={busy} onClick={publish}>{busy ? 'Posting…' : `Post ${job.questions.length} to exam`}</button>
+            </div>
+          </div>
+          <p className="text-xs text-slate-500">Nothing is saved until you click <b>Post</b>. Correct answer highlighted in green.</p>
+          <div className="max-h-[420px] space-y-2 overflow-auto">
+            {job.questions.map((q, i) => (
+              <div key={i} className="rounded-lg border border-slate-100 p-2 text-sm">
+                <p className="font-medium">{i + 1}. {q.question} <span className="ml-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">{q.topic} · {q.difficulty}</span></p>
+                <div className="mt-1 grid grid-cols-2 gap-1">
+                  {q.options.map((o, oi) => (
+                    <span key={oi} className={`rounded px-2 py-0.5 text-xs ${oi === q.answerIndex ? 'bg-green-100 font-semibold text-green-700' : 'bg-slate-50 text-slate-600'}`}>{String.fromCharCode(65 + oi)}. {o}</span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="card space-y-3">
         <h2 className="font-semibold">Import model MCQs (JSON)</h2>
@@ -368,6 +435,62 @@ function ReportTab({ setError }: { setError: (s: string) => void }) {
             ))}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+// ---------------- Exam schedule ----------------
+const pad = (n: number) => String(n).padStart(2, '0');
+const isoToLocalInput = (iso: string | null) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+function ScheduleTab({ setError }: { setError: (s: string) => void }) {
+  const [enabled, setEnabled] = useState(false);
+  const [startAt, setStartAt] = useState('');
+  const [endAt, setEndAt] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.get<{ enabled: boolean; startAt: string | null; endAt: string | null }>('/api/admin/schedule')
+      .then((s) => { setEnabled(s.enabled); setStartAt(isoToLocalInput(s.startAt)); setEndAt(isoToLocalInput(s.endAt)); })
+      .catch((e) => setError(e.message));
+  }, [setError]);
+
+  async function save() {
+    setBusy(true); setMsg(''); setError('');
+    try {
+      const body = {
+        enabled,
+        startAt: enabled && startAt ? new Date(startAt).toISOString() : null,
+        endAt: enabled && endAt ? new Date(endAt).toISOString() : null,
+      };
+      await api.post('/api/admin/schedule', body);
+      setMsg('Schedule saved.'); setTimeout(() => setMsg(''), 2500);
+    } catch (e: any) { setError(e.message); } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="card max-w-xl space-y-4">
+      <div>
+        <h2 className="font-semibold">Exam schedule</h2>
+        <p className="text-sm text-slate-500">Restrict when students can start the exam. When off, the exam is always open.</p>
+      </div>
+      <label className="flex items-center gap-2 text-sm font-medium">
+        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} className="h-4 w-4" />
+        Enable scheduled window
+      </label>
+      <div className={`grid gap-3 sm:grid-cols-2 ${enabled ? '' : 'pointer-events-none opacity-50'}`}>
+        <div><label className="label">Starts at</label><input type="datetime-local" className="input" value={startAt} onChange={(e) => setStartAt(e.target.value)} /></div>
+        <div><label className="label">Ends at</label><input type="datetime-local" className="input" value={endAt} onChange={(e) => setEndAt(e.target.value)} /></div>
+      </div>
+      <p className="text-xs text-slate-400">Times use this computer's timezone. Students who already started may finish; new starts are blocked outside the window.</p>
+      <div className="flex items-center gap-3">
+        <button className="btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save schedule'}</button>
+        {msg && <span className="text-sm text-green-700">{msg}</span>}
       </div>
     </div>
   );

@@ -39,6 +39,9 @@ export async function makeMysqlDb() {
       status VARCHAR(16) NOT NULL, reason VARCHAR(64), started_at VARCHAR(32), submitted_at VARCHAR(32) NULL,
       INDEX ix_student (student_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS settings (
+      k VARCHAR(64) PRIMARY KEY, v JSON
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   }
 
   const COL = { answers: 'answers', score: 'score', status: 'status', submittedAt: 'submitted_at', reason: 'reason' };
@@ -100,6 +103,11 @@ export async function makeMysqlDb() {
       },
       remove: async (id) => { await q('DELETE FROM attempts WHERE id=?', [id]); },
       byStudent: async (studentId) => (await q('SELECT * FROM attempts WHERE student_id=?', [studentId])).map(toAttempt),
+    },
+
+    settings: {
+      get: async (key) => { const r = await q('SELECT v FROM settings WHERE k=?', [key]); return r[0] ? r[0].v : null; },
+      set: async (key, val) => { await q('INSERT INTO settings (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v=VALUES(v)', [key, J(val)]); return val; },
     },
   };
 }

@@ -14,6 +14,11 @@ function read(name) {
   try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return []; }
 }
 const write = (name, arr) => writeFileSync(file(name), JSON.stringify(arr, null, 2));
+function readObj(name) {
+  const p = file(name);
+  if (!existsSync(p)) return {};
+  try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return {}; }
+}
 
 export const jsonDb = {
   driver: 'json',
@@ -62,5 +67,11 @@ export const jsonDb = {
     },
     remove: async (id) => write('attempts', read('attempts').filter((a) => a.id !== id)),
     byStudent: async (studentId) => read('attempts').filter((a) => a.studentId === studentId),
+  },
+
+  // key-value settings (e.g. the exam schedule)
+  settings: {
+    get: async (key) => { const all = readObj('settings'); return all[key] ?? null; },
+    set: async (key, val) => { const all = readObj('settings'); all[key] = val; write('settings', all); return val; },
   },
 };

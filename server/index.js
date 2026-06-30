@@ -39,24 +39,25 @@ app.post('/api/admin/estimate', requireAdmin, (req, res) => {
 
 const jobs = new Map();
 app.post('/api/admin/generate', requireAdmin, async (req, res) => {
-  if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'ANTHROPIC_API_KEY is not set on the server (.env)' });
+  // Key may come from the admin desktop app (preferred) or the server env.
+  const apiKey = String(req.body?.apiKey || '').trim() || process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return res.status(400).json({ error: 'No Claude API key. Enter it in the desktop app (Question bank tab), or set ANTHROPIC_API_KEY on the server.' });
   const syllabus = String(req.body?.syllabus || '').trim();
   const count = Math.max(1, Math.min(50000, Number(req.body?.count) || 1000));
   const replace = !!req.body?.replace;
   if (syllabus.length < 10) return res.status(400).json({ error: 'Provide a syllabus (min 10 chars)' });
 
   const jobId = crypto.randomUUID();
-  jobs.set(jobId, { status: 'running', collected: 0, target: count, requests: 0 });
+  jobs.set(jobId, { status: 'running', collected: 0, target: count, requests: 0, replace });
   (async () => {
     try {
-      if (replace) await db.questions.clear();
       const { questions, stats } = await generateBank({
-        apiKey: process.env.ANTHROPIC_API_KEY, model: MODEL, syllabus, target: count,
+        apiKey, model: MODEL, syllabus, target: count,
         existingNorms: await db.questions.normSet(),
         onProgress: (p) => jobs.set(jobId, { ...jobs.get(jobId), ...p, status: 'running' }),
       });
-      await db.questions.addMany(questions);
-      jobs.set(jobId, { status: 'done', collected: questions.length, target: count, requests: stats.requests, stats, bankTotal: await db.questions.count() });
+      // Hold for PREVIEW — do not save until the admin posts/publishes.
+      jobs.set(jobId, { status: 'ready', collected: questions.length, target: count, requests: stats.requests, stats, replace, questions });
     } catch (e) { jobs.set(jobId, { ...jobs.get(jobId), status: 'error', error: e.message }); }
   })();
   res.json({ jobId });
@@ -65,7 +66,47 @@ app.post('/api/admin/generate', requireAdmin, async (req, res) => {
 app.get('/api/admin/jobs/:id', requireAdmin, (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
-  res.json(job);
+  res.json(job); // when status==='ready', includes the generated `questions` for preview
+});
+
+/** Publish previewed questions into the bank. */
+app.post('/api/admin/generate/:id/publish', requireAdmin, async (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  if (job.status !== 'ready') return res.status(409).json({ error: `Nothing to publish (job is ${job.status})` });
+  if (job.replace) await db.questions.clear();
+  const added = job.questions.length;
+  await db.questions.addMany(job.questions);
+  const bankTotal = await db.questions.count();
+  jobs.set(req.params.id, { ...job, status: 'published', questions: undefined, bankTotal });
+  res.json({ added, bankTotal });
+});
+
+/** Discard previewed questions without saving. */
+app.post('/api/admin/generate/:id/discard', requireAdmin, (req, res) => {
+  jobs.delete(req.params.id);
+  res.json({ ok: true });
+});
+
+// ============ Admin: exam schedule ============
+async function scheduleStatus() {
+  const s = await db.settings.get('schedule');
+  if (!s?.enabled) return { open: true, enabled: false };
+  const now = Date.now();
+  if (s.startAt && now < Date.parse(s.startAt)) return { open: false, enabled: true, reason: 'not_started', startAt: s.startAt, endAt: s.endAt };
+  if (s.endAt && now > Date.parse(s.endAt)) return { open: false, enabled: true, reason: 'closed', startAt: s.startAt, endAt: s.endAt };
+  return { open: true, enabled: true, startAt: s.startAt, endAt: s.endAt };
+}
+
+app.get('/api/admin/schedule', requireAdmin, async (_req, res) =>
+  res.json((await db.settings.get('schedule')) || { enabled: false, startAt: null, endAt: null }));
+
+app.post('/api/admin/schedule', requireAdmin, async (req, res) => {
+  const enabled = !!req.body?.enabled;
+  const startAt = req.body?.startAt ? new Date(req.body.startAt).toISOString() : null;
+  const endAt = req.body?.endAt ? new Date(req.body.endAt).toISOString() : null;
+  if (enabled && startAt && endAt && Date.parse(endAt) <= Date.parse(startAt)) return res.status(400).json({ error: 'End time must be after start time' });
+  res.json(await db.settings.set('schedule', { enabled, startAt, endAt }));
 });
 
 /** Import model/sample MCQs directly (no AI). */
@@ -182,7 +223,7 @@ app.post('/api/login', async (req, res) => {
     student: { registrationNumber: student.registrationNumber, name: student.name, branch: student.branch, section: student.section },
     attempt: done ? { state: 'completed', attemptId: done.id, status: done.status, score: done.score ?? 0, total: done.total, percentage: pct(done.score, done.total) }
       : inProgress ? { state: 'in_progress', attemptId: inProgress.id } : { state: 'none' },
-    quizSize: QUIZ_SIZE, durationMin: QUIZ_DURATION_MIN,
+    quizSize: QUIZ_SIZE, durationMin: QUIZ_DURATION_MIN, schedule: await scheduleStatus(),
   });
 });
 
@@ -198,6 +239,14 @@ app.post('/api/exam/start', async (req, res) => {
   if (done) return res.json({ completed: true, attemptId: done.id });
   const inProgress = mine.find((a) => a.status === 'in_progress');
   if (inProgress) return res.json({ attemptId: inProgress.id, total: inProgress.total });
+  // New attempts must fall within the scheduled exam window (if scheduling is on).
+  const sch = await scheduleStatus();
+  if (!sch.open) return res.status(403).json({
+    error: sch.reason === 'not_started'
+      ? `The exam has not started yet. It opens at ${new Date(sch.startAt).toLocaleString()}.`
+      : 'The exam window has closed.',
+    schedule: sch,
+  });
   const size = Math.min(QUIZ_SIZE, bank.length);
   const picked = shuffle(bank).slice(0, size);
   const attempt = await db.attempts.add({
