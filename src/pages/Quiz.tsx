@@ -143,7 +143,7 @@ export default function Quiz() {
   return (
     <div className="space-y-4">
       {/* TOP: countdown timer bar */}
-      <div className={`sticky top-0 z-20 flex items-center justify-between rounded-xl px-4 py-2 text-white shadow ${remaining <= 60 ? 'bg-red-600' : 'bg-indigo-600'}`}>
+      <div className={`sticky top-0 z-20 flex items-center justify-between rounded-xl px-4 py-2 text-white shadow ${remaining <= 60 ? 'bg-red-600' : 'bg-teal-600'}`}>
         <span className="text-sm font-semibold">Question {idx + 1} / {questions.length} · {Object.keys(answers).length} answered</span>
         <span className="flex items-center gap-2">
           <span className="text-[11px] uppercase tracking-wide opacity-80">Time left</span>

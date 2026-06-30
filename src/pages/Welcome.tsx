@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { ReactNode, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, LoginResponse } from '../api';
 
@@ -65,71 +65,79 @@ export default function Welcome() {
   }
 
   return (
-    <div className="space-y-4">
-      {/* friendly top banner */}
-      <div className="rounded-2xl bg-gradient-to-r from-sky-400 to-indigo-400 px-5 py-3 text-white shadow">
-        <p className="text-sm">Hello 👋</p>
-        <p className="text-2xl font-extrabold">{s.name}</p>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-[300px_1fr]">
-        {/* LEFT: profile */}
-        <div className="space-y-3">
-          <div className="rounded-2xl border-2 border-sky-200 bg-white p-4 shadow-sm">
-            <p className="mb-2 text-xs font-bold uppercase tracking-wide text-sky-600">Your profile</p>
-            <Row icon="🎓" label="Registration" value={s.registrationNumber} />
-            <Row icon="🏫" label="Branch" value={s.branch || '—'} />
-            <Row icon="📋" label="Section" value={s.section || '—'} />
+    <div className="grid gap-5 md:grid-cols-[320px_1fr]">
+      {/* LEFT: teal profile panel */}
+      <aside className="overflow-hidden rounded-3xl bg-gradient-to-b from-teal-600 to-emerald-600 text-white shadow-lg">
+        <div className="px-6 pt-7 text-center">
+          <div className="mx-auto grid h-16 w-16 place-items-center rounded-full bg-white/15 text-2xl font-bold ring-2 ring-white/30">
+            {s.name?.[0] || '?'}
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Tile color="bg-emerald-100 text-emerald-700" big={`${data.quizSize}`} small="Questions" />
-            <Tile color="bg-orange-100 text-orange-700" big={`${data.durationMin}m`} small="Time" />
-          </div>
+          <p className="mt-3 text-lg font-bold leading-tight">{s.name}</p>
+          <p className="text-xs text-teal-50/80">Candidate</p>
         </div>
-
-        {/* RIGHT: instructions */}
-        <div className="rounded-2xl border-2 border-indigo-200 bg-white p-5 shadow-sm">
-          <h2 className="mb-3 flex items-center gap-2 text-lg font-extrabold text-indigo-700">📋 Instructions</h2>
-          <ul className="space-y-2 text-sm">
-            <li className="flex gap-2 rounded-lg bg-emerald-50 p-2"><span>✅</span><span><b>{data.quizSize} questions.</b> Each has 4 options — pick one.</span></li>
-            <li className="flex gap-2 rounded-lg bg-orange-50 p-2"><span>⏱️</span><span>You get <b>{data.durationMin} minutes</b>. A <b>timer at the top</b> counts down and the exam <b>auto-submits</b> when time is over.</span></li>
-            <li className="flex gap-2 rounded-lg bg-sky-50 p-2"><span>🧭</span><span>Questions show on the screen; the <b>number panel</b> lets you jump around. Answered ones turn <span className="font-semibold text-green-600">green</span>.</span></li>
-            <li className="flex gap-2 rounded-lg bg-red-50 p-2 text-red-700"><span>⚠️</span><span>The exam is <b>full screen</b>. If you <b>leave full screen</b> or <b>switch tabs</b>, it <b>ends with 0 marks</b>.</span></li>
-            <li className="flex gap-2 rounded-lg bg-violet-50 p-2"><span>1️⃣</span><span><b>One attempt only.</b> Press <b>Submit</b> when you finish.</span></li>
-          </ul>
-
-          <label className="mt-4 flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-sm font-medium">
-            <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} className="h-4 w-4" />
-            I have read the instructions and agree to the rules.
-          </label>
-          {a.state === 'in_progress' && <p className="mt-2 text-xs text-amber-600">You already have an exam in progress — this will resume it.</p>}
-          <button className="mt-4 w-full rounded-xl bg-indigo-600 py-3 text-base font-bold text-white shadow transition hover:bg-indigo-700 disabled:opacity-50"
-            disabled={!agree || busy} onClick={start}>
-            {busy ? 'Starting…' : a.state === 'in_progress' ? '▶ Resume exam (full screen)' : '▶ Start exam (full screen)'}
-          </button>
+        <div className="mt-5 space-y-px bg-white/10">
+          <Row label="Registration No." value={s.registrationNumber} />
+          <Row label="Branch" value={s.branch || '—'} />
+          <Row label="Section" value={s.section || '—'} />
         </div>
-      </div>
+        <div className="grid grid-cols-2 gap-px bg-white/10">
+          <Tile big={`${data.quizSize}`} small="Questions" />
+          <Tile big={`${data.durationMin} min`} small="Duration" />
+        </div>
+      </aside>
+
+      {/* RIGHT: instructions */}
+      <section className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-slate-200/70">
+        <div className="mb-4 flex items-center gap-2 border-b border-slate-100 pb-3">
+          <span className="grid h-8 w-8 place-items-center rounded-lg bg-teal-50 text-teal-600">📋</span>
+          <h2 className="text-lg font-bold tracking-tight text-slate-800">Exam Instructions</h2>
+        </div>
+        <ul className="space-y-2.5 text-sm text-slate-600">
+          <Bullet n="1">This test has <b className="text-slate-800">{data.quizSize} multiple-choice questions</b>, each with 4 options. Select one answer per question.</Bullet>
+          <Bullet n="2">You have <b className="text-slate-800">{data.durationMin} minutes</b>. A countdown timer is shown at the top; the exam <b className="text-slate-800">submits automatically</b> when time ends.</Bullet>
+          <Bullet n="3">Use the <b className="text-slate-800">question panel</b> to move between questions. Answered questions are marked <span className="font-semibold text-emerald-600">green</span>.</Bullet>
+          <Bullet n="4" danger>The exam runs in <b>full screen</b>. Leaving full screen, switching tabs, or copying is <b>not allowed</b> and will <b>end your exam with 0 marks</b>.</Bullet>
+          <Bullet n="5"><b className="text-slate-800">One attempt only.</b> Review your answers and click <b className="text-slate-800">Submit</b> when finished.</Bullet>
+        </ul>
+
+        <label className="mt-5 flex cursor-pointer items-center gap-2.5 rounded-xl bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 ring-1 ring-slate-200">
+          <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} className="h-4 w-4 accent-teal-600" />
+          I have read and understood the instructions and agree to the exam rules.
+        </label>
+        {a.state === 'in_progress' && <p className="mt-2 text-xs font-medium text-amber-600">You have an exam in progress — this will resume it.</p>}
+        <button
+          className="mt-4 w-full rounded-xl bg-teal-600 py-3.5 text-base font-semibold text-white shadow-sm transition hover:bg-teal-700 focus:ring-4 focus:ring-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!agree || busy} onClick={start}>
+          {busy ? 'Starting…' : a.state === 'in_progress' ? 'Resume Exam in Full Screen' : 'Start Exam in Full Screen'}
+        </button>
+      </section>
     </div>
   );
 }
 
-function Row({ icon, label, value }: { icon: string; label: string; value: string }) {
+function Row({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center gap-2 border-b border-slate-100 py-1.5 last:border-0">
-      <span className="text-lg">{icon}</span>
-      <div>
-        <p className="text-[11px] uppercase tracking-wide text-slate-400">{label}</p>
-        <p className="font-semibold text-slate-800">{value}</p>
-      </div>
+    <div className="flex items-center justify-between bg-teal-700/30 px-6 py-3">
+      <span className="text-xs font-medium uppercase tracking-wide text-teal-50/70">{label}</span>
+      <span className="text-sm font-semibold">{value}</span>
     </div>
   );
 }
 
-function Tile({ color, big, small }: { color: string; big: string; small: string }) {
+function Tile({ big, small }: { big: string; small: string }) {
   return (
-    <div className={`rounded-2xl ${color} p-3 text-center`}>
+    <div className="bg-teal-700/30 px-4 py-4 text-center">
       <p className="text-2xl font-extrabold">{big}</p>
-      <p className="text-xs font-medium">{small}</p>
+      <p className="text-[11px] font-medium uppercase tracking-wide text-teal-50/70">{small}</p>
     </div>
+  );
+}
+
+function Bullet({ n, children, danger }: { n: string; children: ReactNode; danger?: boolean }) {
+  return (
+    <li className="flex gap-3">
+      <span className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full text-[11px] font-bold ${danger ? 'bg-red-100 text-red-600' : 'bg-teal-100 text-teal-700'}`}>{n}</span>
+      <span className={danger ? 'text-red-600' : ''}>{children}</span>
+    </li>
   );
 }

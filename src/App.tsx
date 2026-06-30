@@ -11,11 +11,11 @@ function Logo({ src, fallback }: { src: string; fallback: string }) {
     <img
       src={src}
       alt={fallback}
-      className="h-11 w-auto object-contain"
+      className="h-10 w-auto object-contain"
       onError={(e) => {
         const el = e.currentTarget;
         const span = document.createElement('span');
-        span.className = 'grid h-11 min-w-[44px] place-items-center rounded-xl bg-white/20 px-3 text-sm font-bold text-white';
+        span.className = 'grid h-10 min-w-[40px] place-items-center rounded-lg bg-teal-50 px-3 text-sm font-bold text-teal-700';
         span.textContent = fallback;
         el.replaceWith(span);
       }}
@@ -26,14 +26,14 @@ function Logo({ src, fallback }: { src: string; fallback: string }) {
 export default function App() {
   return (
     <div className="min-h-screen">
-      <header className="bg-gradient-to-r from-blue-700 via-indigo-600 to-violet-600 text-white shadow-md">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3">
+      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/85 backdrop-blur">
+        <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-2.5">
           <Logo src="/logo-left.png" fallback="KL" />
           <Link to="/" className="text-center leading-tight">
-            <div className="text-lg font-bold tracking-wide">KL AI QuizApp</div>
-            <div className="text-[11px] font-medium uppercase tracking-[0.2em] text-white/80">Online Examination</div>
+            <div className="text-base font-bold tracking-tight text-slate-800">KL AI QuizApp</div>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.25em] text-teal-600">Online Examination</div>
           </Link>
-          <Logo src="/logo-right.png" fallback="AI" />
+          <Logo src="/logo-right.png" fallback="SKILL" />
         </div>
       </header>
       <main className="mx-auto max-w-5xl px-4 py-8">
