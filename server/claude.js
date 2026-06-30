@@ -78,7 +78,7 @@ function buildPrompt(syllabus, n, avoidTopics) {
     .join('\n');
 }
 
-async function callClaude({ apiKey, model, syllabus, n, avoidTopics }) {
+async function callMessages({ apiKey, model, prompt }) {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -90,26 +90,63 @@ async function callClaude({ apiKey, model, syllabus, n, avoidTopics }) {
       model,
       max_tokens: 8000,
       output_config: { format: { type: 'json_schema', schema: MCQ_SCHEMA } },
-      messages: [{ role: 'user', content: buildPrompt(syllabus, n, avoidTopics) }],
+      messages: [{ role: 'user', content: prompt }],
     }),
   });
   const text = await res.text();
   if (!res.ok) {
     let msg = `Claude API ${res.status}`;
-    try {
-      const j = JSON.parse(text);
-      msg = j.error?.message ?? msg;
-    } catch {
-      /* keep default */
-    }
+    try { msg = JSON.parse(text).error?.message ?? msg; } catch { /* keep default */ }
     throw new Error(msg);
   }
   const data = JSON.parse(text);
   const block = (data.content || []).find((b) => b.type === 'text');
   if (!block) throw new Error('No text block in Claude response');
   const parsed = JSON.parse(block.text);
-  const usage = data.usage || {};
-  return { questions: parsed.questions || [], usage };
+  return { questions: parsed.questions || [], usage: data.usage || {} };
+}
+
+const callClaude = ({ apiKey, model, syllabus, n, avoidTopics }) =>
+  callMessages({ apiKey, model, prompt: buildPrompt(syllabus, n, avoidTopics) });
+
+function buildExtractPrompt(chunk) {
+  return [
+    `The text below was extracted from a PDF that ALREADY contains multiple-choice questions.`,
+    `Extract EVERY complete MCQ you find and return them as structured JSON.`,
+    `- Do NOT invent new questions — only convert the questions present in the text.`,
+    `- Each MCQ must have exactly 4 options. If the source marks the correct answer (e.g. "Ans: B", *, bold, "Answer: ..."), set answerIndex to it; if none is marked, pick the genuinely correct option.`,
+    `- Preserve the original wording. Drop incomplete/garbled fragments.`,
+    `- topic = subject/concept if evident else "General"; difficulty = best guess; explanation = one short sentence (or "").`,
+    `Text:`,
+    `"""`,
+    chunk,
+    `"""`,
+    `Return only the JSON object matching the schema. If there are no complete MCQs, return an empty questions array.`,
+  ].join('\n');
+}
+
+/** Extract existing MCQs from raw PDF text (chunked for long documents). */
+export async function extractMcqs({ apiKey, model, text, onProgress }) {
+  const clean = String(text || '').trim();
+  if (clean.length < 20) return { questions: [] };
+  const CHUNK = 7000;
+  const chunks = [];
+  for (let i = 0; i < clean.length; i += CHUNK) chunks.push(clean.slice(i, i + CHUNK));
+  const seen = new Set();
+  const out = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const { questions } = await callMessages({ apiKey, model, prompt: buildExtractPrompt(chunks[i]) });
+    for (const q of questions) {
+      if (!q?.question || !Array.isArray(q.options) || q.options.length !== 4) continue;
+      if (typeof q.answerIndex !== 'number' || q.answerIndex < 0 || q.answerIndex > 3) continue;
+      const norm = normalizeQuestion(q.question);
+      if (!norm || seen.has(norm)) continue;
+      seen.add(norm);
+      out.push(q);
+    }
+    onProgress && onProgress({ chunk: i + 1, chunks: chunks.length, found: out.length });
+  }
+  return { questions: out };
 }
 
 /**

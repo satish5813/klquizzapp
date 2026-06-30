@@ -233,8 +233,23 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
   const [keyMsg, setKeyMsg] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
   const mcqFileRef = useRef<HTMLInputElement>(null);
+  const mcqPdfRef = useRef<HTMLInputElement>(null);
 
   function saveKey() { settings.saveClaudeKey(claudeKey.trim()); setKeyMsg('Saved on this computer.'); setTimeout(() => setKeyMsg(''), 2500); }
+
+  // Upload a PDF that already contains MCQs → Claude structures them → into the import box.
+  async function onMcqPdf(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]; if (!f) return;
+    if (!settings.claudeKey()) { setError('Save your Claude API key first (in the section above).'); if (mcqPdfRef.current) mcqPdfRef.current.value = ''; return; }
+    setError(''); setImportMsg('Reading PDF and extracting MCQs with Claude… (may take a moment)');
+    try {
+      const text = await extractPdfText(f);
+      const r = await api.post<{ questions: any[]; count: number }>('/api/admin/parse-mcqs', { text, apiKey: settings.claudeKey() });
+      setImportText(JSON.stringify(r.questions, null, 2));
+      setImportMsg(`Extracted ${r.count} MCQ(s) from "${f.name}" — review below, then Import.`);
+    } catch (err: any) { setError('Extract failed: ' + err.message); setImportMsg(''); }
+    finally { if (mcqPdfRef.current) mcqPdfRef.current.value = ''; }
+  }
 
   // Upload an MCQ file (.json or .csv) into the import box.
   async function onMcqFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -368,9 +383,11 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
       <div className="card space-y-3">
         <h2 className="font-semibold">Import ready-made MCQs</h2>
         <p className="text-xs text-slate-500">Upload a <b>.json</b> or <b>.csv</b> file, or paste below. JSON: array of <code>{`{"question","options":[4],"answerIndex"}`}</code> (or use <code>"answer":"B"</code>/option text). CSV header: <code>question,a,b,c,d,answer</code>.</p>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <input ref={mcqFileRef} type="file" accept=".json,.csv,text/csv,application/json" className="hidden" onChange={onMcqFile} />
           <button className="btn-ghost" onClick={() => mcqFileRef.current?.click()}>📎 Upload MCQ file (.json / .csv)</button>
+          <input ref={mcqPdfRef} type="file" accept="application/pdf" className="hidden" onChange={onMcqPdf} />
+          <button className="btn-ghost" onClick={() => mcqPdfRef.current?.click()}>📄 Upload model MCQ PDF (Claude extracts)</button>
         </div>
         <textarea className="input min-h-[110px] font-mono text-xs" value={importText} onChange={(e) => setImportText(e.target.value)} placeholder='[ { "question": "...", "options": ["...","...","...","..."], "answerIndex": 0 } ]' />
         <div className="flex items-center gap-3">
