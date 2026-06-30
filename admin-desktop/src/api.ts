@@ -4,9 +4,15 @@ const LS_BASE = 'kl_admin_base';
 const LS_TOKEN = 'kl_admin_token';
 const LS_CLAUDE = 'kl_claude_key';
 
+// Defaults can be baked in via admin-desktop/.env (git-ignored):
+//   VITE_API_URL=http://...   VITE_ADMIN_TOKEN=...
+// The Hostinger API is the default server (not localhost).
+const ENV_BASE = (import.meta.env.VITE_API_URL || 'http://p3azuzswx8ewrgojju6xhm1k.187.127.135.148.sslip.io').replace(/\/$/, '');
+const ENV_TOKEN = import.meta.env.VITE_ADMIN_TOKEN || '';
+
 export const settings = {
-  base: () => localStorage.getItem(LS_BASE) || 'http://localhost:4000',
-  token: () => localStorage.getItem(LS_TOKEN) || '',
+  base: () => localStorage.getItem(LS_BASE) || ENV_BASE,
+  token: () => localStorage.getItem(LS_TOKEN) || ENV_TOKEN,
   save: (base: string, token: string) => { localStorage.setItem(LS_BASE, base); localStorage.setItem(LS_TOKEN, token); },
   // Claude API key — stored locally on this machine only, sent to your own server for generation.
   claudeKey: () => localStorage.getItem(LS_CLAUDE) || '',

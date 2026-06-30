@@ -6,6 +6,7 @@ type Tab = 'overview' | 'users' | 'bank' | 'results' | 'report' | 'schedule';
 
 export default function App() {
   const [connected, setConnected] = useState(false);
+  const [connecting, setConnecting] = useState(!!settings.token());
   const [base, setBase] = useState(settings.base());
   const [token, setToken] = useState(settings.token());
   const [appName, setAppName] = useState('KL AI QuizApp');
@@ -30,7 +31,7 @@ export default function App() {
   }
 
   async function connect() {
-    setConnErr('');
+    setConnErr(''); setConnecting(true);
     settings.save(base.trim().replace(/\/$/, ''), token.trim());
     try {
       const h = await api.get<{ app: string }>('/api/health', false);
@@ -38,10 +39,26 @@ export default function App() {
       await api.get('/api/admin/bank/stats'); // validates token
       setConnected(true);
       await loadAll();
-    } catch (e: any) { setConnErr(e.message); }
+    } catch (e: any) { setConnErr(e.message); } finally { setConnecting(false); }
   }
 
+  // Auto-connect on launch when a token is already configured (no prompt).
+  useEffect(() => {
+    if (settings.token()) connect(); else setConnecting(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   if (!connected) {
+    if (connecting) {
+      return (
+        <div className="grid min-h-screen place-items-center p-6 text-center">
+          <div>
+            <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-brand-600 border-t-transparent" />
+            <p className="text-sm text-slate-500">Connecting to {settings.base()}…</p>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="grid min-h-screen place-items-center p-6">
         <div className="card w-full max-w-sm">
@@ -49,11 +66,11 @@ export default function App() {
           <p className="mb-4 text-sm text-slate-500">Connect to your quiz server.</p>
           {connErr && <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{connErr}</div>}
           <label className="label">Server URL</label>
-          <input className="input mb-3" value={base} onChange={(e) => setBase(e.target.value)} placeholder="http://localhost:4000" />
+          <input className="input mb-3" value={base} onChange={(e) => setBase(e.target.value)} placeholder="https://…sslip.io" />
           <label className="label">Admin token</label>
           <input className="input mb-4" type="password" value={token} onChange={(e) => setToken(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && connect()} placeholder="ADMIN_TOKEN" />
           <button className="btn-primary w-full" onClick={connect}>Connect</button>
-          <p className="mt-3 text-xs text-slate-400">For students on other PCs, run the server on this machine and point them to its LAN IP.</p>
+          <p className="mt-3 text-xs text-slate-400">Defaults to the Hostinger API. Set <code>admin-desktop/.env</code> to skip this screen.</p>
         </div>
       </div>
     );
