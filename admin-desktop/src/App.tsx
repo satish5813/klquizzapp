@@ -520,7 +520,7 @@ function ResultsTab({ attempts, onChanged, setError }: { attempts: Attempt[]; on
       {!attempts.length ? <div className="card text-sm text-slate-400">No attempts yet.</div> : (
         <div className="card overflow-x-auto p-0">
           <table className="w-full text-sm">
-            <thead className="border-b border-slate-100 bg-slate-50"><tr>{['Reg. No', 'Name', 'Branch', 'Score', '%', 'Status', 'Submitted', ''].map((h) => <th key={h} className="th">{h}</th>)}</tr></thead>
+            <thead className="border-b border-slate-100 bg-slate-50"><tr>{['Reg. No', 'Name', 'Branch', 'Score', '%', 'Status', 'Warnings', 'Submitted', ''].map((h) => <th key={h} className="th">{h}</th>)}</tr></thead>
             <tbody>
               {attempts.map((a) => (
                 <tr key={a.attemptId} className={`border-b border-slate-50 ${a.status === 'terminated' ? 'bg-red-50/50' : ''}`}>
@@ -530,6 +530,7 @@ function ResultsTab({ attempts, onChanged, setError }: { attempts: Attempt[]; on
                   <td className="td">{a.score == null ? '—' : `${a.score}/${a.total}`}</td>
                   <td className="td">{a.percentage == null ? '—' : `${a.percentage}%`}</td>
                   <td className="td"><StatusBadge status={a.status} reason={a.reason} /></td>
+                  <td className="td">{a.violations ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">{a.violations}</span> : <span className="text-slate-300">0</span>}</td>
                   <td className="td text-xs text-slate-500">{a.submittedAt ? new Date(a.submittedAt).toLocaleString() : '—'}</td>
                   <td className="td whitespace-nowrap">
                     {a.status === 'submitted' && <button className="mr-2 text-xs font-medium text-brand-700 hover:underline" onClick={() => openReview(a)}>Review</button>}

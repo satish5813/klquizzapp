@@ -236,7 +236,7 @@ async function attemptRows() {
     return {
       attemptId: a.id, registrationNumber: s.registrationNumber || '', name: s.name || '', branch: s.branch || '', section: s.section || '',
       score: a.score, total: a.total, percentage: a.score == null ? null : pct(a.score, a.total),
-      status: a.status, reason: a.reason || '', startedAt: a.startedAt, submittedAt: a.submittedAt,
+      status: a.status, reason: a.reason || '', violations: a.violations ?? 0, startedAt: a.startedAt, submittedAt: a.submittedAt,
     };
   }).sort((x, y) => (y.startedAt || '').localeCompare(x.startedAt || ''));
 }
@@ -246,8 +246,8 @@ app.get('/api/admin/attempts', requireAdmin, async (_req, res) => res.json(await
 app.get('/api/admin/export.csv', requireAdmin, async (_req, res) => {
   const rows = await attemptRows();
   const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const header = ['RegistrationNumber', 'Name', 'Branch', 'Section', 'Score', 'Total', 'Percentage', 'Status', 'Reason', 'StartedAt', 'SubmittedAt'];
-  const lines = rows.map((r) => [r.registrationNumber, r.name, r.branch, r.section, r.score ?? '', r.total, r.percentage ?? '', r.status, r.reason, r.startedAt, r.submittedAt || ''].map(esc).join(','));
+  const header = ['RegistrationNumber', 'Name', 'Branch', 'Section', 'Score', 'Total', 'Percentage', 'Status', 'Violations', 'StartedAt', 'SubmittedAt'];
+  const lines = rows.map((r) => [r.registrationNumber, r.name, r.branch, r.section, r.score ?? '', r.total, r.percentage ?? '', r.status, r.violations ?? 0, r.startedAt, r.submittedAt || ''].map(esc).join(','));
   res.setHeader('content-type', 'text/csv');
   res.setHeader('content-disposition', 'attachment; filename="kl-ai-quiz-results.csv"');
   res.send([header.join(','), ...lines].join('\n'));
@@ -342,10 +342,11 @@ app.post('/api/quiz/:attemptId/submit', async (req, res) => {
   if (!attempt) return res.status(404).json({ error: 'Attempt not found' });
   if (attempt.status !== 'in_progress') return res.status(409).json({ error: `Attempt already ${attempt.status}` });
   const answers = req.body?.answers || {};
+  const violations = Math.max(0, Number(req.body?.violations) || 0);
   const { byId } = await getBank();
   let score = 0;
   for (const id of attempt.questionIds) { const q = byId.get(id); if (q && Number(answers[id]) === q.answerIndex) score++; }
-  const updated = await db.attempts.update(attempt.id, { answers, score, status: 'submitted', submittedAt: new Date().toISOString() });
+  const updated = await db.attempts.update(attempt.id, { answers, score, violations, status: 'submitted', submittedAt: new Date().toISOString() });
   res.json({ score, total: updated.total, percentage: pct(score, updated.total) });
 });
 

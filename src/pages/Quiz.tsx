@@ -11,12 +11,14 @@ export default function Quiz() {
   const [idx, setIdx] = useState(0);
   const [loading, setLoading] = useState(true);
   const [started, setStarted] = useState(false);
-  const [terminated, setTerminated] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [deadline, setDeadline] = useState(0); // epoch ms when the exam auto-submits
   const [remaining, setRemaining] = useState(0); // seconds left
-  const endedRef = useRef(false); // true once submitted or terminated (stops the guard)
+  const [showResume, setShowResume] = useState(false); // full-screen warning overlay
+  const [violations, setViolations] = useState(0);
+  const violationsRef = useRef(0);
+  const endedRef = useRef(false); // true once submitted (stops the guard)
   const submitRef = useRef<() => void>(() => {});
 
   useEffect(() => {
@@ -45,27 +47,25 @@ export default function Quiz() {
     return () => clearInterval(t);
   }, [started, deadline]);
 
-  // --- Secure exam guard: leaving fullscreen or switching tab ends the exam (0 marks) ---
-  function terminate(reason: string) {
+  // --- Exam guard: leaving full screen / switching tab does NOT end the exam.
+  //     It is counted as a violation and a "resume full screen" overlay is shown. ---
+  function flagViolation() {
     if (endedRef.current) return;
-    endedRef.current = true;
-    setTerminated(reason);
-    api.post(`/api/quiz/${attemptId}/terminate`, { reason }).catch(() => {});
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    violationsRef.current += 1;
+    setViolations(violationsRef.current);
+    setShowResume(true);
   }
 
   useEffect(() => {
     if (!started) return;
-    const onFs = () => { if (!document.fullscreenElement) terminate('exited-fullscreen'); };
-    const onVis = () => { if (document.hidden) terminate('tab-switch'); };
-    const onBlur = () => terminate('window-blur');
-    // Lock the keyboard during the exam — it's click-only. Blocks shortcuts
-    // (reload, devtools, copy/paste, etc.). Released when the exam ends.
+    const onFs = () => { if (!document.fullscreenElement) flagViolation(); };
+    const onVis = () => { if (document.hidden) flagViolation(); };
+    // Lock the keyboard during the exam — it's click-only (blocks reload, devtools,
+    // copy/paste shortcuts, etc.). Released when the exam ends.
     const onKey = (e: KeyboardEvent) => { e.preventDefault(); e.stopPropagation(); };
     const block = (e: Event) => { e.preventDefault(); e.stopPropagation(); };
     document.addEventListener('fullscreenchange', onFs);
     document.addEventListener('visibilitychange', onVis);
-    window.addEventListener('blur', onBlur);
     document.addEventListener('keydown', onKey, true);
     document.addEventListener('contextmenu', block, true);
     document.addEventListener('copy', block, true);
@@ -74,7 +74,6 @@ export default function Quiz() {
     return () => {
       document.removeEventListener('fullscreenchange', onFs);
       document.removeEventListener('visibilitychange', onVis);
-      window.removeEventListener('blur', onBlur);
       document.removeEventListener('keydown', onKey, true);
       document.removeEventListener('contextmenu', block, true);
       document.removeEventListener('copy', block, true);
@@ -88,12 +87,16 @@ export default function Quiz() {
     try { await document.documentElement.requestFullscreen(); } catch { /* some browsers block; still start */ }
     setStarted(true);
   }
+  async function resume() {
+    try { await document.documentElement.requestFullscreen(); } catch { /* ignore */ }
+    setShowResume(false);
+  }
 
   async function submit() {
     setBusy(true); setError('');
-    endedRef.current = true; // prevent the exit-fullscreen from this submit triggering terminate
+    endedRef.current = true;
     try {
-      await api.post(`/api/quiz/${attemptId}/submit`, { answers });
+      await api.post(`/api/quiz/${attemptId}/submit`, { answers, violations: violationsRef.current });
       if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
       navigate(`/result/${attemptId}`);
     } catch (e: any) { setError(e.message); setBusy(false); endedRef.current = false; }
@@ -104,21 +107,6 @@ export default function Quiz() {
 
   if (loading) return <p className="text-sm text-slate-400">Loading exam…</p>;
   if (error && !started) return <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>;
-
-  // Terminated screen
-  if (terminated) {
-    return (
-      <div className="card mx-auto max-w-md border-2 border-red-200 text-center">
-        <p className="text-5xl">⛔</p>
-        <h1 className="mt-2 text-xl font-bold text-red-700">Exam ended</h1>
-        <p className="mt-1 text-sm text-slate-600">
-          You left full screen / switched away ({terminated}). As per the rules, your exam has been
-          terminated and recorded as <b>0 marks</b>.
-        </p>
-        <button className="btn-ghost mt-4" onClick={() => navigate('/')}>Back to start</button>
-      </div>
-    );
-  }
 
   // Start gate
   if (!started) {
@@ -143,6 +131,23 @@ export default function Quiz() {
   // Exam layout: countdown timer on top; MCQ left, question palette right
   return (
     <div className="space-y-4">
+      {/* Full-screen warning overlay — blocks the exam until the student resumes (no penalty) */}
+      {showResume && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-900/90 p-6 text-center">
+          <div className="max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+            <p className="text-4xl">⚠️</p>
+            <h2 className="mt-2 text-xl font-bold text-red-700">Please stay in full screen</h2>
+            <p className="mt-1 text-sm text-slate-600">
+              You left full screen or switched away. This has been recorded (warning #{violations}).
+              Your answers are saved — click below to continue the exam.
+            </p>
+            <button onClick={resume} className="mt-4 w-full rounded-xl bg-teal-600 py-3 text-base font-semibold text-white shadow-sm hover:bg-teal-700">
+              Resume exam in full screen
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* TOP: countdown timer bar */}
       <div className={`sticky top-0 z-20 flex items-center justify-between rounded-xl px-4 py-2 text-white shadow ${remaining <= 60 ? 'bg-red-600' : 'bg-teal-600'}`}>
         <span className="text-sm font-semibold">Question {idx + 1} / {questions.length} · {Object.keys(answers).length} answered</span>
