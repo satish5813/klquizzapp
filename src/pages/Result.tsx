@@ -44,7 +44,8 @@ export default function Result() {
     );
   }
 
-  const passed = data.percentage >= 40;
+  const PASS_MARK = 75;
+  const passed = data.percentage >= PASS_MARK;
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
@@ -75,9 +76,9 @@ export default function Result() {
               <p className="text-3xl font-extrabold text-slate-800">{data.score}/{data.total}</p>
               <p className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Correct</p>
             </div>
-            <div className={`flex-1 rounded-xl py-3 ${passed ? 'bg-green-50' : 'bg-amber-50'}`}>
-              <p className={`text-3xl font-extrabold ${passed ? 'text-green-700' : 'text-amber-700'}`}>{passed ? 'Pass' : '—'}</p>
-              <p className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Result</p>
+            <div className={`flex-1 rounded-xl py-3 ${passed ? 'bg-green-50' : 'bg-red-50'}`}>
+              <p className={`text-3xl font-extrabold ${passed ? 'text-green-700' : 'text-red-600'}`}>{passed ? 'Pass' : 'Fail'}</p>
+              <p className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Result (pass ≥ {PASS_MARK}%)</p>
             </div>
           </div>
 
