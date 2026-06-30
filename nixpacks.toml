@@ -1,0 +1,17 @@
+# This repo holds the API server AND the React client. On the Hostinger VPS we
+# host ONLY the API server — the client is deployed separately to Vercel.
+# This config makes Nixpacks skip the frontend build and just run the API.
+providers = ["node"]
+
+[variables]
+NIXPACKS_NODE_VERSION = "22"
+
+[phases.install]
+cmds = ["npm install --omit=dev"]
+
+# No build step for the API (skips the frontend's `tsc && vite build`).
+[phases.build]
+cmds = ["echo 'API-only deploy — no frontend build'"]
+
+[start]
+cmd = "node server/index.js"
