@@ -9,7 +9,7 @@ const PORT = Number(process.env.PORT || 4000);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'change-me-admin';
 const MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
 const QUIZ_SIZE = Number(process.env.QUIZ_SIZE || 60);
-const QUIZ_DURATION_MIN = Number(process.env.QUIZ_DURATION_MIN || 60);
+const QUIZ_DURATION_MIN = Number(process.env.QUIZ_DURATION_MIN || 90);
 const APP_NAME = 'KL AI QuizApp';
 
 const db = await initStore();
@@ -23,6 +23,18 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 const pct = (score, total) => Math.round(((score ?? 0) / total) * 100);
+
+// In-memory question bank cache — avoids a full questions read on every
+// start/quiz/submit, so the API scales to thousands of concurrent students.
+let _bank = null;
+async function getBank() {
+  if (!_bank) {
+    const list = await db.questions.all();
+    _bank = { list, byId: new Map(list.map((q) => [q.id, q])) };
+  }
+  return _bank;
+}
+const invalidateBank = () => { _bank = null; };
 
 app.get('/api/health', (_req, res) =>
   res.json({ app: APP_NAME, status: 'ok', model: MODEL, driver: db.driver, quizSize: QUIZ_SIZE, durationMin: QUIZ_DURATION_MIN, hasKey: !!process.env.ANTHROPIC_API_KEY }));
@@ -77,6 +89,7 @@ app.post('/api/admin/generate/:id/publish', requireAdmin, async (req, res) => {
   if (job.replace) await db.questions.clear();
   const added = job.questions.length;
   await db.questions.addMany(job.questions);
+  invalidateBank();
   const bankTotal = await db.questions.count();
   jobs.set(req.params.id, { ...job, status: 'published', questions: undefined, bankTotal });
   res.json({ added, bankTotal });
@@ -136,6 +149,7 @@ app.post('/api/admin/import', requireAdmin, async (req, res) => {
     toAdd.push({ id: crypto.randomUUID(), question, options, answerIndex, topic: q.topic || 'General', difficulty: (q.difficulty || 'MEDIUM').toUpperCase(), explanation: q.explanation || '', norm });
   });
   await db.questions.addMany(toAdd);
+  invalidateBank();
   res.json({ added: toAdd.length, skipped: errors.length, errors: errors.slice(0, 50), bankTotal: await db.questions.count() });
 });
 
@@ -232,7 +246,7 @@ app.post('/api/exam/start', async (req, res) => {
   const registrationNumber = String(req.body?.registrationNumber || '').trim();
   const student = await db.students.byRegNo(registrationNumber);
   if (!student) return res.status(404).json({ error: 'Registration number not found.' });
-  const bank = await db.questions.all();
+  const bank = (await getBank()).list;
   if (!bank.length) return res.status(400).json({ error: 'No questions available yet. Please contact the coordinator.' });
   const mine = await db.attempts.byStudent(student.id);
   const done = mine.find((a) => a.status === 'submitted' || a.status === 'terminated');
@@ -260,7 +274,7 @@ app.post('/api/exam/start', async (req, res) => {
 app.get('/api/quiz/:attemptId', async (req, res) => {
   const attempt = await db.attempts.get(req.params.attemptId);
   if (!attempt) return res.status(404).json({ error: 'Attempt not found' });
-  const byId = new Map((await db.questions.all()).map((q) => [q.id, q]));
+  const { byId } = await getBank();
   const questions = attempt.questionIds.map((id) => byId.get(id)).filter(Boolean)
     .map((q) => ({ id: q.id, question: q.question, options: q.options, topic: q.topic, difficulty: q.difficulty }));
   res.json({ attemptId: attempt.id, total: attempt.total, status: attempt.status, startedAt: attempt.startedAt, durationMin: QUIZ_DURATION_MIN, questions });
@@ -271,7 +285,7 @@ app.post('/api/quiz/:attemptId/submit', async (req, res) => {
   if (!attempt) return res.status(404).json({ error: 'Attempt not found' });
   if (attempt.status !== 'in_progress') return res.status(409).json({ error: `Attempt already ${attempt.status}` });
   const answers = req.body?.answers || {};
-  const byId = new Map((await db.questions.all()).map((q) => [q.id, q]));
+  const { byId } = await getBank();
   let score = 0;
   for (const id of attempt.questionIds) { const q = byId.get(id); if (q && Number(answers[id]) === q.answerIndex) score++; }
   const updated = await db.attempts.update(attempt.id, { answers, score, status: 'submitted', submittedAt: new Date().toISOString() });
@@ -292,7 +306,7 @@ app.get('/api/result/:attemptId', async (req, res) => {
   if (!attempt) return res.status(404).json({ error: 'Attempt not found' });
   if (attempt.status === 'in_progress') return res.status(409).json({ error: 'Not submitted yet' });
   const terminated = attempt.status === 'terminated';
-  const byId = new Map((await db.questions.all()).map((q) => [q.id, q]));
+  const { byId } = await getBank();
   const review = terminated ? [] : attempt.questionIds.map((id) => {
     const q = byId.get(id); const your = attempt.answers[id];
     return { question: q?.question, options: q?.options, correctIndex: q?.answerIndex, yourIndex: your === undefined ? null : Number(your), correct: q ? Number(your) === q.answerIndex : false, explanation: q?.explanation };

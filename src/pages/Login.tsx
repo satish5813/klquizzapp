@@ -2,6 +2,18 @@ import { FormEvent, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, LoginResponse } from '../api';
 
+// Logo with graceful text fallback (same files as the header).
+function Logo({ src, fallback }: { src: string; fallback: string }) {
+  return (
+    <img src={src} alt={fallback} className="h-14 w-auto object-contain"
+      onError={(e) => {
+        const s = document.createElement('span');
+        s.className = 'grid h-14 min-w-[56px] place-items-center rounded-xl bg-indigo-100 px-3 font-bold text-indigo-700';
+        s.textContent = fallback; e.currentTarget.replaceWith(s);
+      }} />
+  );
+}
+
 export default function Login() {
   const navigate = useNavigate();
   const [reg, setReg] = useState('');
@@ -19,19 +31,33 @@ export default function Login() {
   }
 
   return (
-    <div className="card mx-auto max-w-md">
-      <h1 className="text-xl font-semibold">Student login</h1>
-      <p className="mb-5 text-sm text-slate-500">Enter your university registration number to continue.</p>
-      {error && <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
-      <form onSubmit={submit} className="space-y-3">
-        <div>
-          <label className="label">University registration number</label>
-          <input className="input text-center text-lg tracking-widest" value={reg} autoFocus
-            onChange={(e) => setReg(e.target.value)} placeholder="e.g. 2100030001" required />
+    <div className="mx-auto max-w-md">
+      <div className="overflow-hidden rounded-3xl bg-white shadow-lg ring-1 ring-slate-100">
+        {/* colorful hero with both logos */}
+        <div className="bg-gradient-to-br from-sky-500 via-indigo-500 to-violet-500 px-6 py-7 text-center text-white">
+          <div className="mb-3 flex items-center justify-center gap-4 rounded-2xl bg-white/95 px-4 py-3">
+            <Logo src="/logo-left.png" fallback="KL" />
+            <div className="h-10 w-px bg-slate-200" />
+            <Logo src="/logo-right.png" fallback="SKILL" />
+          </div>
+          <h1 className="text-2xl font-extrabold">KL AI QuizApp</h1>
+          <p className="text-sm text-white/85">Online Examination Portal</p>
         </div>
-        <button className="btn-primary w-full" disabled={busy || !reg.trim()}>{busy ? 'Checking…' : 'Continue'}</button>
-      </form>
-      <p className="mt-4 text-center text-xs text-slate-400">Not able to log in? Contact your exam coordinator.</p>
+
+        {/* login form */}
+        <form onSubmit={submit} className="space-y-4 px-6 py-6">
+          <div>
+            <label className="mb-1 block text-sm font-semibold text-slate-700">Enter your Registration Number</label>
+            <input className="w-full rounded-xl border-2 border-slate-200 px-4 py-3 text-center text-lg font-semibold tracking-widest outline-none focus:border-indigo-500"
+              value={reg} autoFocus onChange={(e) => setReg(e.target.value)} placeholder="e.g. 2300032983" required />
+          </div>
+          {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+          <button className="w-full rounded-xl bg-indigo-600 py-3 text-base font-bold text-white shadow transition hover:bg-indigo-700 disabled:opacity-50" disabled={busy || !reg.trim()}>
+            {busy ? 'Checking…' : 'Login →'}
+          </button>
+          <p className="text-center text-xs text-slate-400">Use the registration number from your hall ticket. Trouble logging in? Contact your coordinator.</p>
+        </form>
+      </div>
     </div>
   );
 }

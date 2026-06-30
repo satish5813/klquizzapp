@@ -17,7 +17,8 @@ export async function makeMysqlDb() {
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
     waitForConnections: true,
-    connectionLimit: 10,
+    connectionLimit: 25,
+    queueLimit: 0,
     ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
   });
   const q = async (sql, params) => (await pool.query(sql, params))[0];

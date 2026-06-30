@@ -3,7 +3,6 @@ import Login from './pages/Login';
 import Welcome from './pages/Welcome';
 import Quiz from './pages/Quiz';
 import Result from './pages/Result';
-import Admin from './pages/Admin';
 
 // Two logos: drop your images at public/logo-left.png and public/logo-right.png.
 // If a file is missing it falls back to a styled badge so the layout never breaks.
@@ -43,13 +42,9 @@ export default function App() {
           <Route path="/welcome" element={<Welcome />} />
           <Route path="/quiz/:attemptId" element={<Quiz />} />
           <Route path="/result/:attemptId" element={<Result />} />
-          <Route path="/admin" element={<Admin />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
-      <footer className="pb-6 text-center text-xs text-slate-400">
-        <Link to="/admin" className="hover:text-slate-600">Admin</Link>
-      </footer>
     </div>
   );
 }

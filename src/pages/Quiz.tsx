@@ -58,13 +58,27 @@ export default function Quiz() {
     const onFs = () => { if (!document.fullscreenElement) terminate('exited-fullscreen'); };
     const onVis = () => { if (document.hidden) terminate('tab-switch'); };
     const onBlur = () => terminate('window-blur');
+    // Lock the keyboard during the exam — it's click-only. Blocks shortcuts
+    // (reload, devtools, copy/paste, etc.). Released when the exam ends.
+    const onKey = (e: KeyboardEvent) => { e.preventDefault(); e.stopPropagation(); };
+    const block = (e: Event) => { e.preventDefault(); e.stopPropagation(); };
     document.addEventListener('fullscreenchange', onFs);
     document.addEventListener('visibilitychange', onVis);
     window.addEventListener('blur', onBlur);
+    document.addEventListener('keydown', onKey, true);
+    document.addEventListener('contextmenu', block, true);
+    document.addEventListener('copy', block, true);
+    document.addEventListener('cut', block, true);
+    document.addEventListener('paste', block, true);
     return () => {
       document.removeEventListener('fullscreenchange', onFs);
       document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('blur', onBlur);
+      document.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('contextmenu', block, true);
+      document.removeEventListener('copy', block, true);
+      document.removeEventListener('cut', block, true);
+      document.removeEventListener('paste', block, true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [started]);
