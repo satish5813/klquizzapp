@@ -38,7 +38,16 @@ export const jsonDb = {
     get: async (id) => read('students').find((s) => s.id === id) || null,
     byRegNo: async (rn) => read('students').find((s) => s.registrationNumber === rn) || null,
     add: async (s) => { const cur = read('students'); cur.push(s); write('students', cur); return s; },
-    // Upsert a roster by registrationNumber. rows: [{ id, registrationNumber, name, branch, section, createdAt }]
+    update: async (id, patch) => {
+      const cur = read('students');
+      const i = cur.findIndex((s) => s.id === id);
+      if (i === -1) return null;
+      const allow = ['name', 'branch', 'section', 'active'];
+      for (const k of allow) if (k in patch) cur[i][k] = patch[k];
+      write('students', cur);
+      return cur[i];
+    },
+    // Upsert a roster by registrationNumber. New rows default to active.
     importMany: async (rows) => {
       const cur = read('students');
       const idx = new Map(cur.map((s) => [s.registrationNumber, s]));
@@ -46,7 +55,7 @@ export const jsonDb = {
       for (const r of rows) {
         const existing = idx.get(r.registrationNumber);
         if (existing) { Object.assign(existing, { name: r.name, branch: r.branch, section: r.section }); updated++; }
-        else { cur.push(r); idx.set(r.registrationNumber, r); added++; }
+        else { cur.push({ ...r, active: true }); idx.set(r.registrationNumber, r); added++; }
       }
       write('students', cur);
       return { added, updated, total: cur.length };

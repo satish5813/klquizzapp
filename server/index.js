@@ -193,7 +193,40 @@ app.post('/api/admin/students/import', requireAdmin, async (req, res) => {
   res.json({ ...r, skipped: errors.length, errors: errors.slice(0, 50) });
 });
 
-app.get('/api/admin/students', requireAdmin, async (_req, res) => res.json(await db.students.all()));
+/** Students list with search, active/inactive filter, and pagination. */
+app.get('/api/admin/students', requireAdmin, async (req, res) => {
+  const all = await db.students.all();
+  const isActive = (s) => s.active !== false;
+  const activeCount = all.filter(isActive).length;
+  const status = String(req.query.status || 'all');
+  const search = String(req.query.search || '').trim().toLowerCase();
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const pageSize = Math.min(200, Math.max(5, Number(req.query.pageSize) || 25));
+
+  let rows = all;
+  if (status === 'active') rows = rows.filter(isActive);
+  else if (status === 'inactive') rows = rows.filter((s) => !isActive(s));
+  if (search) rows = rows.filter((s) =>
+    [s.registrationNumber, s.name, s.branch, s.section].some((v) => String(v || '').toLowerCase().includes(search)));
+
+  const total = rows.length;
+  const start = (page - 1) * pageSize;
+  res.json({
+    rows: rows.slice(start, start + pageSize),
+    total, page, pageSize,
+    activeCount, inactiveCount: all.length - activeCount, allCount: all.length,
+  });
+});
+
+/** Update a student's profile / active state. */
+app.post('/api/admin/students/:id', requireAdmin, async (req, res) => {
+  const patch = {};
+  for (const k of ['name', 'branch', 'section']) if (typeof req.body?.[k] === 'string') patch[k] = req.body[k].trim();
+  if (typeof req.body?.active === 'boolean') patch.active = req.body.active;
+  const updated = await db.students.update(req.params.id, patch);
+  if (!updated) return res.status(404).json({ error: 'Student not found' });
+  res.json(updated);
+});
 
 // ============ Admin: results & reports ============
 async function attemptRows() {
@@ -252,6 +285,7 @@ app.post('/api/login', async (req, res) => {
   if (!registrationNumber) return res.status(400).json({ error: 'Enter your registration number' });
   const student = await db.students.byRegNo(registrationNumber);
   if (!student) return res.status(404).json({ error: 'Registration number not found. Please contact the exam coordinator.' });
+  if (student.active === false) return res.status(403).json({ error: 'Your account is deactivated. Please contact the exam coordinator.' });
   const mine = await db.attempts.byStudent(student.id);
   const done = mine.find((a) => a.status === 'submitted' || a.status === 'terminated');
   const inProgress = mine.find((a) => a.status === 'in_progress');
@@ -268,6 +302,7 @@ app.post('/api/exam/start', async (req, res) => {
   const registrationNumber = String(req.body?.registrationNumber || '').trim();
   const student = await db.students.byRegNo(registrationNumber);
   if (!student) return res.status(404).json({ error: 'Registration number not found.' });
+  if (student.active === false) return res.status(403).json({ error: 'Your account is deactivated. Please contact the exam coordinator.' });
   const bank = (await getBank()).list;
   if (!bank.length) return res.status(400).json({ error: 'No questions available yet. Please contact the coordinator.' });
   const mine = await db.attempts.byStudent(student.id);

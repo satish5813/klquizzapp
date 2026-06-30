@@ -41,7 +41,8 @@ export const api = {
   raw: (p: string) => fetch(settings.base() + p, { headers: { 'x-admin-token': settings.token() } }),
 };
 
-export interface Student { id: string; registrationNumber: string; name: string; branch: string; section?: string; createdAt: string; }
+export interface Student { id: string; registrationNumber: string; name: string; branch: string; section?: string; active?: boolean; createdAt: string; }
+export interface StudentsPage { rows: Student[]; total: number; page: number; pageSize: number; activeCount: number; inactiveCount: number; allCount: number; }
 export interface Attempt { attemptId: string; registrationNumber: string; name: string; branch: string; score: number | null; total: number; percentage: number | null; status: string; reason: string; startedAt: string; submittedAt: string | null; }
 export interface QReport { id: string; question: string; topic: string; difficulty: string; answered: number; correct: number; pctCorrect: number | null; }
 export interface ReviewItem { question: string; options: string[]; correctIndex: number; yourIndex: number | null; correct: boolean; explanation: string; }

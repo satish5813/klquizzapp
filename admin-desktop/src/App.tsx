@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, settings, Student, Attempt, QReport, ReviewItem } from './api';
+import { api, settings, Student, StudentsPage, Attempt, QReport, ReviewItem } from './api';
 import { extractPdfText } from './pdf';
 
 type Tab = 'overview' | 'users' | 'bank' | 'results' | 'report' | 'schedule';
@@ -15,18 +15,20 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('overview');
   const [error, setError] = useState('');
   const [bank, setBank] = useState<{ count: number; topics: string[] }>({ count: 0, topics: [] });
-  const [students, setStudents] = useState<Student[]>([]);
+  const [studentStats, setStudentStats] = useState({ total: 0, active: 0, inactive: 0 });
   const [attempts, setAttempts] = useState<Attempt[]>([]);
 
   async function loadAll() {
     setError('');
     try {
-      const [b, s, a] = await Promise.all([
+      const [b, sc, a] = await Promise.all([
         api.get<{ count: number; topics: string[] }>('/api/admin/bank/stats'),
-        api.get<Student[]>('/api/admin/students'),
+        api.get<StudentsPage>('/api/admin/students?pageSize=1'),
         api.get<Attempt[]>('/api/admin/attempts'),
       ]);
-      setBank(b); setStudents(s); setAttempts(a);
+      setBank(b);
+      setStudentStats({ total: sc.allCount, active: sc.activeCount, inactive: sc.inactiveCount });
+      setAttempts(a);
     } catch (e: any) { setError(e.message); }
   }
 
@@ -105,15 +107,17 @@ export default function App() {
         {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
 
         {tab === 'overview' && (
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
             <Stat label="Questions" value={bank.count} />
-            <Stat label="Students" value={students.length} />
+            <Stat label="Students" value={studentStats.total} />
+            <Stat label="Active" value={studentStats.active} />
+            <Stat label="Inactive" value={studentStats.inactive} />
             <Stat label="Submitted" value={submitted} />
             <Stat label="Terminated" value={terminated} />
           </div>
         )}
 
-        {tab === 'users' && <UsersTab students={students} attempts={attempts} onChanged={loadAll} setError={setError} />}
+        {tab === 'users' && <UsersTab attempts={attempts} onChanged={loadAll} setError={setError} />}
         {tab === 'bank' && <BankTab bank={bank} onChanged={loadAll} setError={setError} />}
         {tab === 'schedule' && <ScheduleTab setError={setError} />}
         {tab === 'results' && <ResultsTab attempts={attempts} onChanged={loadAll} setError={setError} />}
@@ -155,15 +159,43 @@ function parseRoster(text: string): { registrationNumber: string; name: string; 
   return body.map((l) => { const c = cells(l); return { registrationNumber: c[iReg] || '', name: c[iName] || '', branch: iBranch >= 0 ? c[iBranch] || '' : '', section: iSec >= 0 ? c[iSec] || '' : '' }; });
 }
 
-// ---------------- User management (roster import + Reopen exam) ----------------
-function UsersTab({ students, attempts, onChanged, setError }: { students: Student[]; attempts: Attempt[]; onChanged: () => void; setError: (s: string) => void }) {
+// ---------------- User management (roster import + search/paginate + active + edit) ----------------
+function UsersTab({ attempts, onChanged, setError }: { attempts: Attempt[]; onChanged: () => void; setError: (s: string) => void }) {
   const byReg = new Map(attempts.map((a) => [a.registrationNumber, a]));
   const [rosterText, setRosterText] = useState('');
+  const [showImport, setShowImport] = useState(false);
   const [msg, setMsg] = useState('');
-  async function reopen(a: Attempt) {
-    if (!window.confirm(`Reopen the exam for ${a.name} (${a.registrationNumber})?\n\nTheir current result will be cleared and they can take the exam again.`)) return;
-    try { await api.post(`/api/admin/attempts/${a.attemptId}/reopen`); onChanged(); }
+
+  const [data, setData] = useState<StudentsPage | null>(null);
+  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState<'all' | 'active' | 'inactive'>('all');
+  const [page, setPage] = useState(1);
+  const [edit, setEdit] = useState<Student | null>(null);
+  const pageSize = 25;
+
+  async function load() {
+    try { setData(await api.get<StudentsPage>(`/api/admin/students?search=${encodeURIComponent(query)}&status=${status}&page=${page}&pageSize=${pageSize}`)); }
     catch (e: any) { setError(e.message); }
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [query, status, page]);
+
+  function doSearch() { setPage(1); setQuery(search.trim()); }
+  async function refresh() { await load(); onChanged(); }
+
+  async function toggleActive(s: Student) {
+    try { await api.post(`/api/admin/students/${s.id}`, { active: s.active === false }); refresh(); }
+    catch (e: any) { setError(e.message); }
+  }
+  async function saveEdit() {
+    if (!edit) return;
+    try { await api.post(`/api/admin/students/${edit.id}`, { name: edit.name, branch: edit.branch, section: edit.section }); setEdit(null); refresh(); }
+    catch (e: any) { setError(e.message); }
+  }
+  async function reopen(a: Attempt) {
+    if (!window.confirm(`Reopen the exam for ${a.name} (${a.registrationNumber})? Their result will be cleared.`)) return;
+    try { await api.post(`/api/admin/attempts/${a.attemptId}/reopen`); refresh(); } catch (e: any) { setError(e.message); }
   }
   async function importRoster() {
     setMsg(''); setError('');
@@ -174,42 +206,99 @@ function UsersTab({ students, attempts, onChanged, setError }: { students: Stude
     try {
       const r = await api.post<{ added: number; updated: number; total: number; skipped: number }>('/api/admin/students/import', { students: rows });
       setMsg(`Imported ${r.added} new, updated ${r.updated}, skipped ${r.skipped}. Roster total: ${r.total}.`);
-      setRosterText(''); onChanged();
+      setRosterText(''); refresh();
     } catch (e: any) { setError(e.message); }
   }
+
+  const totalPages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
+
   return (
     <div className="space-y-4">
+      {/* roster import (collapsible) */}
       <div className="card space-y-2">
-        <h2 className="font-semibold">Import student roster</h2>
-        <p className="text-xs text-slate-500">Paste <b>CSV</b> with a header row <code>registrationNumber,name,branch,section</code> (or a JSON array). Students log in with their registration number only. Re-importing updates existing rows.</p>
-        <textarea className="input min-h-[120px] font-mono text-xs" value={rosterText} onChange={(e) => setRosterText(e.target.value)} placeholder={'registrationNumber,name,branch,section\n2100030001,Asha Rao,CSE1,A\n2100030002,Ravi Kumar,ECE,B'} />
-        <div className="flex items-center gap-3">
-          <button className="btn-primary" disabled={!rosterText.trim()} onClick={importRoster}>Import roster</button>
-          {msg && <span className="text-sm text-green-700">{msg}</span>}
+        <div className="flex items-center justify-between">
+          <h2 className="font-semibold">Student roster {data && <span className="text-sm font-normal text-slate-400">· {data.allCount} total · {data.activeCount} active · {data.inactiveCount} inactive</span>}</h2>
+          <button className="btn-ghost" onClick={() => setShowImport((v) => !v)}>{showImport ? 'Hide import' : 'Import roster (CSV/JSON)'}</button>
+        </div>
+        {showImport && (
+          <>
+            <p className="text-xs text-slate-500">Paste <b>CSV</b> with header <code>registrationNumber,name,branch,section</code> (or a JSON array). Re-importing updates existing rows.</p>
+            <textarea className="input min-h-[110px] font-mono text-xs" value={rosterText} onChange={(e) => setRosterText(e.target.value)} placeholder={'registrationNumber,name,branch,section\n2100030001,Asha Rao,CSE1,A'} />
+            <div className="flex items-center gap-3">
+              <button className="btn-primary" disabled={!rosterText.trim()} onClick={importRoster}>Import roster</button>
+              {msg && <span className="text-sm text-green-700">{msg}</span>}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* search + filter */}
+      <div className="card flex flex-wrap items-center gap-2">
+        <input className="input max-w-xs" placeholder="Search reg. no, name, branch, section…" value={search}
+          onChange={(e) => setSearch(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && doSearch()} />
+        <button className="btn-primary" onClick={doSearch}>Search</button>
+        {query && <button className="btn-ghost" onClick={() => { setSearch(''); setQuery(''); setPage(1); }}>Clear</button>}
+        <div className="ml-auto flex gap-1">
+          {(['all', 'active', 'inactive'] as const).map((st) => (
+            <button key={st} onClick={() => { setStatus(st); setPage(1); }}
+              className={`rounded-lg px-3 py-1.5 text-sm font-medium capitalize ${status === st ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-600'}`}>{st}</button>
+          ))}
         </div>
       </div>
 
-      {!students.length ? <div className="card text-sm text-slate-400">No students in the roster yet — import above.</div> : (
-        <div className="card overflow-x-auto p-0">
-          <table className="w-full text-sm">
-            <thead className="border-b border-slate-100 bg-slate-50"><tr>{['Reg. No', 'Name', 'Branch', 'Section', 'Attempt', 'Score', 'Action'].map((h) => <th key={h} className="th">{h}</th>)}</tr></thead>
-            <tbody>
-              {students.map((s) => {
-                const a = byReg.get(s.registrationNumber);
-                return (
-                  <tr key={s.id} className="border-b border-slate-50">
-                    <td className="td font-mono text-xs">{s.registrationNumber}</td>
-                    <td className="td font-medium">{s.name}</td>
-                    <td className="td">{s.branch}</td>
-                    <td className="td">{s.section || '—'}</td>
-                    <td className="td">{a ? <StatusBadge status={a.status} reason={a.reason} /> : <span className="text-slate-400">none</span>}</td>
-                    <td className="td">{a && a.score != null ? `${a.score}/${a.total}` : '—'}</td>
-                    <td className="td">{a && a.status !== 'in_progress' ? <button className="btn-danger" onClick={() => reopen(a)}>Reopen exam</button> : <span className="text-xs text-slate-400">—</span>}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+      {/* table */}
+      <div className="card overflow-x-auto p-0">
+        <table className="w-full text-sm">
+          <thead className="border-b border-slate-100 bg-slate-50"><tr>{['Reg. No', 'Name', 'Branch', 'Section', 'Status', 'Attempt', 'Actions'].map((h) => <th key={h} className="th">{h}</th>)}</tr></thead>
+          <tbody>
+            {data?.rows.map((s) => {
+              const a = byReg.get(s.registrationNumber);
+              const active = s.active !== false;
+              return (
+                <tr key={s.id} className={`border-b border-slate-50 ${!active ? 'bg-slate-50/70 text-slate-400' : ''}`}>
+                  <td className="td font-mono text-xs">{s.registrationNumber}</td>
+                  <td className="td font-medium">{s.name}</td>
+                  <td className="td">{s.branch}</td>
+                  <td className="td">{s.section || '—'}</td>
+                  <td className="td"><span className={`rounded-full px-2 py-0.5 text-xs font-medium ${active ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-600'}`}>{active ? 'active' : 'inactive'}</span></td>
+                  <td className="td">{a ? <StatusBadge status={a.status} reason={a.reason} /> : <span className="text-slate-400">none</span>}</td>
+                  <td className="td whitespace-nowrap">
+                    <button className="mr-2 text-xs font-medium text-brand-700 hover:underline" onClick={() => setEdit({ ...s })}>Edit</button>
+                    <button className="mr-2 text-xs font-medium text-slate-600 hover:underline" onClick={() => toggleActive(s)}>{active ? 'Deactivate' : 'Activate'}</button>
+                    {a && a.status !== 'in_progress' && <button className="text-xs font-medium text-red-600 hover:underline" onClick={() => reopen(a)}>Reopen</button>}
+                  </td>
+                </tr>
+              );
+            })}
+            {data && !data.rows.length && <tr><td className="td text-slate-400" colSpan={7}>No students match.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+
+      {/* pagination */}
+      {data && (
+        <div className="flex items-center justify-between text-sm text-slate-500">
+          <span>{data.total.toLocaleString()} student(s) · page {data.page} of {totalPages}</span>
+          <div className="flex gap-2">
+            <button className="btn-ghost" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>← Prev</button>
+            <button className="btn-ghost" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>Next →</button>
+          </div>
+        </div>
+      )}
+
+      {/* edit modal */}
+      {edit && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/30 p-4" onClick={() => setEdit(null)}>
+          <div className="card w-full max-w-sm space-y-3" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between"><h3 className="font-semibold">Edit profile</h3><button className="btn-ghost" onClick={() => setEdit(null)}>Close</button></div>
+            <p className="font-mono text-xs text-slate-400">{edit.registrationNumber}</p>
+            <div><label className="label">Name</label><input className="input" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></div>
+            <div className="grid grid-cols-2 gap-3">
+              <div><label className="label">Branch</label><input className="input" value={edit.branch} onChange={(e) => setEdit({ ...edit, branch: e.target.value })} /></div>
+              <div><label className="label">Section</label><input className="input" value={edit.section || ''} onChange={(e) => setEdit({ ...edit, section: e.target.value })} /></div>
+            </div>
+            <button className="btn-primary w-full" onClick={saveEdit}>Save changes</button>
+          </div>
         </div>
       )}
     </div>
