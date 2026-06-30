@@ -23,8 +23,11 @@ export default function Login() {
     e.preventDefault();
     setBusy(true); setError('');
     try {
-      await api.post<LoginResponse>('/api/login', { registrationNumber: reg.trim() });
+      const r = await api.post<LoginResponse>('/api/login', { registrationNumber: reg.trim() });
       sessionStorage.setItem('kl_reg', reg.trim());
+      sessionStorage.setItem('kl_name', r.student.name || '');
+      sessionStorage.setItem('kl_branch', r.student.branch || '');
+      sessionStorage.setItem('kl_section', r.student.section || '');
       navigate('/welcome');
     } catch (err: any) { setError(err.message); setBusy(false); }
   }

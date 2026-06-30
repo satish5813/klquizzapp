@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, QuizQuestion } from '../api';
+import RichText from '../RichText';
 
 export default function Quiz() {
   const { attemptId } = useParams();
@@ -162,15 +163,15 @@ export default function Quiz() {
               <span className="rounded-full bg-slate-100 px-2 py-0.5">{q.difficulty}</span>
             </span>
           </div>
-          <p className="mb-4 text-lg font-medium">{q.question}</p>
+          <RichText text={q.question} className="mb-4 text-lg font-medium leading-relaxed" />
           <div className="space-y-2">
             {q.options.map((opt, i) => {
               const selected = answers[q.id] === i;
               return (
                 <button key={i} onClick={() => setAnswers((a) => ({ ...a, [q.id]: i }))}
-                  className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm ${selected ? 'border-brand-600 bg-brand-50' : 'border-slate-200 hover:bg-slate-50'}`}>
-                  <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs font-semibold ${selected ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-500'}`}>{String.fromCharCode(65 + i)}</span>
-                  {opt}
+                  className={`flex w-full items-start gap-3 rounded-lg border px-3 py-2.5 text-left text-base ${selected ? 'border-brand-600 bg-brand-50' : 'border-slate-200 hover:bg-slate-50'}`}>
+                  <span className={`mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs font-semibold ${selected ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-500'}`}>{String.fromCharCode(65 + i)}</span>
+                  <RichText text={opt} className="min-w-0 flex-1" />
                 </button>
               );
             })}
