@@ -1,0 +1,9 @@
+node_modules
+dist
+admin-desktop
+src
+public
+.git
+.env
+server/data
+*.md
