@@ -82,6 +82,13 @@ export async function makeMysqlDb() {
         if (ids.length) await q('DELETE FROM questions WHERE id IN (?)', [ids]);
         return ids.length;
       },
+      renameDomain: async (from, to) => {
+        const all = await q('SELECT id, domain FROM questions');
+        const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const ids = all.filter((r) => norm(r.domain) === norm(from)).map((r) => r.id);
+        if (ids.length) await q('UPDATE questions SET domain=? WHERE id IN (?)', [to, ids]);
+        return ids.length;
+      },
       normSet: async () => new Set((await q('SELECT norm FROM questions')).map((r) => r.norm)),
       assignDomain: async (domain, onlyUntagged = true) => {
         const r = onlyUntagged

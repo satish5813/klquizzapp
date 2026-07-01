@@ -36,6 +36,13 @@ export const jsonDb = {
       write('questions', keep);
       return cur.length - keep.length;
     },
+    renameDomain: async (from, to) => {
+      const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const cur = read('questions'); let n = 0;
+      for (const q of cur) if (norm(q.domain) === norm(from)) { q.domain = to; n++; }
+      write('questions', cur);
+      return n;
+    },
     normSet: async () => new Set(read('questions').map((q) => q.norm)),
     // Tag a domain onto questions (all, or only those currently untagged). Returns count changed.
     assignDomain: async (domain, onlyUntagged = true) => {

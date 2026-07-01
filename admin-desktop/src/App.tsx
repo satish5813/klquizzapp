@@ -317,6 +317,10 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
   const [count, setCount] = useState('1000');
   const [replace, setReplace] = useState(false);
   const [domain, setDomain] = useState(localStorage.getItem('kl_gen_domain') || 'Java Core');
+  const [studentDomains, setStudentDomains] = useState<string[]>([]);
+  const [renameFrom, setRenameFrom] = useState('');
+  const [renameTo, setRenameTo] = useState('');
+  useEffect(() => { api.get<{ domains: string[] }>('/api/admin/schedules').then((r) => setStudentDomains(r.domains || [])).catch(() => {}); }, []);
   const [est, setEst] = useState<any>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
@@ -346,6 +350,11 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
     if (!window.confirm(`Delete the ENTIRE question bank (${bank.count} questions, all domains)? This cannot be undone.`)) return;
     if (!window.confirm('Are you absolutely sure? Every question will be removed.')) return;
     try { const r = await api.post<{ removed: number }>('/api/admin/questions/clear', {}); onChanged(); window.alert(`Deleted ${r.removed} question(s).`); }
+    catch (e: any) { setError(e.message); }
+  }
+  async function renameDomain() {
+    if (!renameFrom.trim() || !renameTo.trim()) { setError('Enter both "from" and "to" domain.'); return; }
+    try { const r = await api.post<{ changed: number }>('/api/admin/questions/rename-domain', { from: renameFrom.trim(), to: renameTo.trim() }); onChanged(); window.alert(`Renamed ${r.changed} question(s): "${renameFrom}" → "${renameTo}".`); setRenameFrom(''); setRenameTo(''); }
     catch (e: any) { setError(e.message); }
   }
 
@@ -455,10 +464,11 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
       {/* Domain — questions are tagged with this; each student gets their own domain's questions */}
       <div className="card space-y-2">
         <h2 className="font-semibold">Exam domain</h2>
-        <p className="text-xs text-slate-500">Questions you generate / import below are tagged with this domain. A student only gets questions from <b>their</b> Hackathon Domain (e.g. <code>Java Core</code>, <code>Python</code>).</p>
+        <p className="text-xs text-slate-500">Questions you generate / import below are tagged with this domain. A student only gets questions from <b>their</b> Hackathon Domain — the label must match <b>exactly</b>.</p>
+        {studentDomains.length > 0 && <p className="text-xs">Student domains: {studentDomains.map((d) => <button key={d} onClick={() => { setDomain(d); localStorage.setItem('kl_gen_domain', d); }} className="mr-1 rounded-full bg-teal-50 px-2 py-0.5 font-medium text-teal-700 hover:bg-teal-100">{d}</button>)} <span className="text-slate-400">(click to use)</span></p>}
         <div className="flex items-center gap-2">
           <input className="input max-w-xs" value={domain} onChange={(e) => { setDomain(e.target.value); localStorage.setItem('kl_gen_domain', e.target.value); }} placeholder="e.g. Java Core" list="domain-list" />
-          <datalist id="domain-list">{Object.keys(bank.byDomain || {}).map((d) => <option key={d} value={d} />)}</datalist>
+          <datalist id="domain-list">{[...new Set([...studentDomains, ...Object.keys(bank.byDomain || {})])].map((d) => <option key={d} value={d} />)}</datalist>
           {bank.byDomain && bank.byDomain['(none)'] > 0 && (
             <button className="btn-ghost" onClick={assignUntagged}>Tag {bank.byDomain['(none)']} untagged → {domain || '…'}</button>
           )}
@@ -541,6 +551,18 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
       </div>
 
       {!!bank.topics.length && <div className="card"><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Topics</p><div className="flex flex-wrap gap-1.5">{bank.topics.map((t) => <span key={t} className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{t}</span>)}</div></div>}
+
+      {/* Fix a mislabeled domain */}
+      <div className="card space-y-2">
+        <h2 className="font-semibold">Rename a question domain</h2>
+        <p className="text-xs text-slate-500">Fix a label mismatch (e.g. questions tagged <code>Python Core</code> but students are <code>Python</code>). Renames existing questions — no regeneration.</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <input className="input max-w-[180px]" value={renameFrom} onChange={(e) => setRenameFrom(e.target.value)} placeholder="from (e.g. Python Core)" list="domain-list" />
+          <span className="text-slate-400">→</span>
+          <input className="input max-w-[180px]" value={renameTo} onChange={(e) => setRenameTo(e.target.value)} placeholder="to (e.g. Python)" list="domain-list" />
+          <button className="btn-primary" onClick={renameDomain}>Rename</button>
+        </div>
+      </div>
 
       {/* Danger zone — delete questions */}
       <div className="card space-y-2 border border-red-100">

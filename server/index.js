@@ -63,6 +63,16 @@ app.post('/api/admin/questions/clear', requireAdmin, async (req, res) => {
   res.json({ removed, bankTotal: await db.questions.count() });
 });
 
+/** Rename a question domain (e.g. fix "Python Core" → "Python" to match students). */
+app.post('/api/admin/questions/rename-domain', requireAdmin, async (req, res) => {
+  const from = String(req.body?.from || '').trim();
+  const to = String(req.body?.to || '').trim();
+  if (!from || !to) return res.status(400).json({ error: 'Provide from and to' });
+  const changed = await db.questions.renameDomain(from, to);
+  invalidateBank();
+  res.json({ changed, from, to });
+});
+
 /** Tag a domain onto existing questions (default: only those without a domain). */
 app.post('/api/admin/questions/assign-domain', requireAdmin, async (req, res) => {
   const domain = String(req.body?.domain || '').trim();
