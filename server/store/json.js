@@ -29,6 +29,13 @@ export const jsonDb = {
     count: async () => read('questions').length,
     addMany: async (items) => { const cur = read('questions'); cur.push(...items); write('questions', cur); return cur.length; },
     clear: async () => write('questions', []),
+    clearDomain: async (domain) => {
+      const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const cur = read('questions');
+      const keep = cur.filter((q) => norm(q.domain) !== norm(domain));
+      write('questions', keep);
+      return cur.length - keep.length;
+    },
     normSet: async () => new Set(read('questions').map((q) => q.norm)),
     // Tag a domain onto questions (all, or only those currently untagged). Returns count changed.
     assignDomain: async (domain, onlyUntagged = true) => {

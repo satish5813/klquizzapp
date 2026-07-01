@@ -74,6 +74,14 @@ export async function makeMysqlDb() {
         return (await q('SELECT COUNT(*) n FROM questions'))[0].n;
       },
       clear: async () => { await q('DELETE FROM questions'); },
+      clearDomain: async (domain) => {
+        // match on normalized domain (so "Java Core" == "JavaCore")
+        const all = await q('SELECT id, domain FROM questions');
+        const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const ids = all.filter((r) => norm(r.domain) === norm(domain)).map((r) => r.id);
+        if (ids.length) await q('DELETE FROM questions WHERE id IN (?)', [ids]);
+        return ids.length;
+      },
       normSet: async () => new Set((await q('SELECT norm FROM questions')).map((r) => r.norm)),
       assignDomain: async (domain, onlyUntagged = true) => {
         const r = onlyUntagged

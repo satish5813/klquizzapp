@@ -53,6 +53,16 @@ app.post('/api/admin/estimate', requireAdmin, (req, res) => {
   res.json(estimate(Math.max(1, Math.min(50000, Number(req.body?.count) || 1000))));
 });
 
+/** Delete questions — a whole domain's, or the entire bank. */
+app.post('/api/admin/questions/clear', requireAdmin, async (req, res) => {
+  const domain = String(req.body?.domain || '').trim();
+  let removed;
+  if (domain) removed = await db.questions.clearDomain(domain);
+  else { removed = await db.questions.count(); await db.questions.clear(); }
+  invalidateBank();
+  res.json({ removed, bankTotal: await db.questions.count() });
+});
+
 /** Tag a domain onto existing questions (default: only those without a domain). */
 app.post('/api/admin/questions/assign-domain', requireAdmin, async (req, res) => {
   const domain = String(req.body?.domain || '').trim();

@@ -336,6 +336,18 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
     try { const r = await api.post<{ changed: number }>('/api/admin/questions/assign-domain', { domain: domain.trim() }); onChanged(); window.alert(`Tagged ${r.changed} question(s) as "${domain}".`); }
     catch (e: any) { setError(e.message); }
   }
+  async function deleteDomainQuestions() {
+    if (!domain.trim()) { setError('Enter a domain first.'); return; }
+    if (!window.confirm(`Delete ALL "${domain}" questions from the bank? This cannot be undone.`)) return;
+    try { const r = await api.post<{ removed: number; bankTotal: number }>('/api/admin/questions/clear', { domain: domain.trim() }); onChanged(); window.alert(`Deleted ${r.removed} "${domain}" question(s). Bank now ${r.bankTotal}.`); }
+    catch (e: any) { setError(e.message); }
+  }
+  async function deleteAllQuestions() {
+    if (!window.confirm(`Delete the ENTIRE question bank (${bank.count} questions, all domains)? This cannot be undone.`)) return;
+    if (!window.confirm('Are you absolutely sure? Every question will be removed.')) return;
+    try { const r = await api.post<{ removed: number }>('/api/admin/questions/clear', {}); onChanged(); window.alert(`Deleted ${r.removed} question(s).`); }
+    catch (e: any) { setError(e.message); }
+  }
 
   // Upload a PDF that already contains MCQs → Claude structures them (background job) → into the import box.
   async function onMcqPdf(e: React.ChangeEvent<HTMLInputElement>) {
@@ -529,6 +541,16 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
       </div>
 
       {!!bank.topics.length && <div className="card"><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Topics</p><div className="flex flex-wrap gap-1.5">{bank.topics.map((t) => <span key={t} className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{t}</span>)}</div></div>}
+
+      {/* Danger zone — delete questions */}
+      <div className="card space-y-2 border border-red-100">
+        <h2 className="font-semibold text-red-700">Delete questions</h2>
+        <p className="text-xs text-slate-500">Remove questions from the bank. Use "delete this domain" to clear a wrong set before re-adding.</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <button className="btn-danger" onClick={deleteDomainQuestions}>Delete "{domain || '…'}" questions{bank.byDomain?.[domain] ? ` (${bank.byDomain[domain]})` : ''}</button>
+          <button className="btn-ghost text-red-600 ring-1 ring-red-200" onClick={deleteAllQuestions}>Delete ALL questions ({bank.count})</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -656,17 +678,21 @@ interface Sched { enabled: boolean; startAt: string; endAt: string }
 function ScheduleTab({ setError }: { setError: (s: string) => void }) {
   const [domains, setDomains] = useState<string[]>([]);
   const [sched, setSched] = useState<Record<string, Sched>>({});
+  const [counts, setCounts] = useState<Record<string, number>>({});
   const [msg, setMsg] = useState('');
 
   async function load() {
     try {
-      const r = await api.get<{ schedules: Record<string, any>; domains: string[] }>('/api/admin/schedules');
+      const [r, stats] = await Promise.all([
+        api.get<{ schedules: Record<string, any>; domains: string[] }>('/api/admin/schedules'),
+        api.get<{ byDomain?: Record<string, number> }>('/api/admin/bank/stats'),
+      ]);
       const s: Record<string, Sched> = {};
       for (const d of r.domains) {
         const e = r.schedules[d] || {};
         s[d] = { enabled: !!e.enabled, startAt: isoToLocalInput(e.startAt || null), endAt: isoToLocalInput(e.endAt || null) };
       }
-      setDomains(r.domains); setSched(s);
+      setDomains(r.domains); setSched(s); setCounts(stats.byDomain || {});
     } catch (e: any) { setError(e.message); }
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -699,11 +725,15 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
         return (
           <div key={d} className="card space-y-3">
             <div className="flex items-center justify-between">
-              <h3 className="font-semibold">{d} <span className={`ml-2 rounded-full px-2 py-0.5 text-xs font-medium ${live ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}`}>{live ? 'OPEN — students can start' : s.enabled ? 'enabled (scheduled)' : 'closed'}</span></h3>
+              <h3 className="font-semibold">{d}
+                <span className={`ml-2 rounded-full px-2 py-0.5 text-xs font-medium ${live ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}`}>{live ? 'OPEN — students can start' : s.enabled ? 'enabled (scheduled)' : 'closed'}</span>
+                <span className={`ml-2 rounded-full px-2 py-0.5 text-xs font-medium ${(counts[d] || 0) > 0 ? 'bg-indigo-50 text-indigo-700' : 'bg-red-100 text-red-700'}`}>{counts[d] || 0} question{(counts[d] || 0) === 1 ? '' : 's'}</span>
+              </h3>
               <label className="flex items-center gap-2 text-sm font-medium">
                 <input type="checkbox" checked={s.enabled} onChange={(e) => upd(d, { enabled: e.target.checked })} className="h-4 w-4 accent-teal-600" /> Enable
               </label>
             </div>
+            {!(counts[d] || 0) && <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">⚠ No questions for {d} yet — students can't start even if enabled. Add {d} questions in the Question bank tab first.</p>}
             <div className={`grid gap-3 sm:grid-cols-2 ${s.enabled ? '' : 'pointer-events-none opacity-40'}`}>
               <div><label className="label">Starts at (optional)</label><input type="datetime-local" className="input" value={s.startAt} onChange={(e) => upd(d, { startAt: e.target.value })} /></div>
               <div><label className="label">Ends at (optional)</label><input type="datetime-local" className="input" value={s.endAt} onChange={(e) => upd(d, { endAt: e.target.value })} /></div>
