@@ -27,5 +27,5 @@ export interface QuizQuestion { id: string; question: string; options: string[];
 export interface ReviewItem { question: string; options: string[]; correctIndex: number; yourIndex: number | null; correct: boolean; explanation: string; }
 export interface StudentInfo { registrationNumber: string; name: string; branch: string; section: string; domain?: string; }
 export interface AttemptInfo { state: 'none' | 'in_progress' | 'completed'; attemptId?: string; status?: string; score?: number; total?: number; percentage?: number; }
-export interface ScheduleInfo { open: boolean; enabled: boolean; reason?: 'not_started' | 'closed'; startAt?: string | null; endAt?: string | null; }
+export interface ScheduleInfo { open: boolean; reason?: 'open' | 'not_scheduled' | 'not_started' | 'closed'; domain?: string; startAt?: string | null; endAt?: string | null; }
 export interface LoginResponse { student: StudentInfo; attempt: AttemptInfo; quizSize: number; durationMin: number; schedule: ScheduleInfo; }

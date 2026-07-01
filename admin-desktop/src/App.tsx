@@ -546,12 +546,20 @@ function ResultsTab({ attempts, onChanged, setError }: { attempts: Attempt[]; on
     catch (e: any) { setError(e.message); }
   }
   async function reopen(a: Attempt) {
-    if (!window.confirm(`Reopen the exam for ${a.name}? Their result will be cleared.`)) return;
+    if (!window.confirm(`Delete ${a.name}'s exam result? They will be able to take the exam again.`)) return;
     try { await api.post(`/api/admin/attempts/${a.attemptId}/reopen`); onChanged(); } catch (e: any) { setError(e.message); }
+  }
+  async function clearAll() {
+    if (!window.confirm(`Delete ALL ${attempts.length} exam result(s)? Every student can retake. This cannot be undone.`)) return;
+    if (!window.confirm('Are you absolutely sure? This wipes every attempt.')) return;
+    try { const r = await api.post<{ cleared: number }>('/api/admin/attempts/clear-all'); onChanged(); window.alert(`Deleted ${r.cleared} attempt(s).`); } catch (e: any) { setError(e.message); }
   }
   return (
     <div className="space-y-3">
-      <div className="flex justify-end"><button className="btn-ghost" disabled={!attempts.length} onClick={exportCsv}>⬇ Export CSV</button></div>
+      <div className="flex justify-end gap-2">
+        <button className="btn-danger" disabled={!attempts.length} onClick={clearAll}>🗑 Delete all results</button>
+        <button className="btn-ghost" disabled={!attempts.length} onClick={exportCsv}>⬇ Export CSV</button>
+      </div>
       {!attempts.length ? <div className="card text-sm text-slate-400">No attempts yet.</div> : (
         <div className="card overflow-x-auto p-0">
           <table className="w-full text-sm">
@@ -569,7 +577,7 @@ function ResultsTab({ attempts, onChanged, setError }: { attempts: Attempt[]; on
                   <td className="td text-xs text-slate-500">{a.submittedAt ? new Date(a.submittedAt).toLocaleString() : '—'}</td>
                   <td className="td whitespace-nowrap">
                     {a.status === 'submitted' && <button className="mr-2 text-xs font-medium text-brand-700 hover:underline" onClick={() => openReview(a)}>Review</button>}
-                    {a.status !== 'in_progress' && <button className="text-xs font-medium text-red-600 hover:underline" onClick={() => reopen(a)}>Reopen</button>}
+                    {a.status !== 'in_progress' && <button className="text-xs font-medium text-red-600 hover:underline" onClick={() => reopen(a)}>Delete</button>}
                   </td>
                 </tr>
               ))}
@@ -644,51 +652,67 @@ const isoToLocalInput = (iso: string | null) => {
   const d = new Date(iso);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
+interface Sched { enabled: boolean; startAt: string; endAt: string }
 function ScheduleTab({ setError }: { setError: (s: string) => void }) {
-  const [enabled, setEnabled] = useState(false);
-  const [startAt, setStartAt] = useState('');
-  const [endAt, setEndAt] = useState('');
+  const [domains, setDomains] = useState<string[]>([]);
+  const [sched, setSched] = useState<Record<string, Sched>>({});
   const [msg, setMsg] = useState('');
-  const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    api.get<{ enabled: boolean; startAt: string | null; endAt: string | null }>('/api/admin/schedule')
-      .then((s) => { setEnabled(s.enabled); setStartAt(isoToLocalInput(s.startAt)); setEndAt(isoToLocalInput(s.endAt)); })
-      .catch((e) => setError(e.message));
-  }, [setError]);
-
-  async function save() {
-    setBusy(true); setMsg(''); setError('');
+  async function load() {
     try {
-      const body = {
-        enabled,
-        startAt: enabled && startAt ? new Date(startAt).toISOString() : null,
-        endAt: enabled && endAt ? new Date(endAt).toISOString() : null,
-      };
-      await api.post('/api/admin/schedule', body);
-      setMsg('Schedule saved.'); setTimeout(() => setMsg(''), 2500);
-    } catch (e: any) { setError(e.message); } finally { setBusy(false); }
+      const r = await api.get<{ schedules: Record<string, any>; domains: string[] }>('/api/admin/schedules');
+      const s: Record<string, Sched> = {};
+      for (const d of r.domains) {
+        const e = r.schedules[d] || {};
+        s[d] = { enabled: !!e.enabled, startAt: isoToLocalInput(e.startAt || null), endAt: isoToLocalInput(e.endAt || null) };
+      }
+      setDomains(r.domains); setSched(s);
+    } catch (e: any) { setError(e.message); }
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, []);
+
+  const upd = (d: string, patch: Partial<Sched>) => setSched((s) => ({ ...s, [d]: { ...s[d], ...patch } }));
+  async function save(d: string) {
+    const s = sched[d]; setMsg(''); setError('');
+    try {
+      await api.post('/api/admin/schedules', {
+        domain: d, enabled: s.enabled,
+        startAt: s.enabled && s.startAt ? new Date(s.startAt).toISOString() : null,
+        endAt: s.enabled && s.endAt ? new Date(s.endAt).toISOString() : null,
+      });
+      setMsg(`"${d}" saved.`); setTimeout(() => setMsg(''), 2500);
+    } catch (e: any) { setError(e.message); }
   }
 
+  if (!domains.length) return <div className="card text-sm text-slate-400">No student domains found yet. Import a roster that has a Hackathon Domain column, then come back.</div>;
+
   return (
-    <div className="card max-w-xl space-y-4">
-      <div>
-        <h2 className="font-semibold">Exam schedule</h2>
-        <p className="text-sm text-slate-500">Restrict when students can start the exam. When off, the exam is always open.</p>
+    <div className="space-y-4">
+      <div className="card">
+        <h2 className="font-semibold">Exam schedule (per domain)</h2>
+        <p className="text-sm text-slate-500">Each domain's exam is <b>closed</b> until you enable it here. Enable a domain (optionally with a start/end window) so only that domain's students can start. {msg && <span className="ml-2 font-medium text-green-700">{msg}</span>}</p>
       </div>
-      <label className="flex items-center gap-2 text-sm font-medium">
-        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} className="h-4 w-4" />
-        Enable scheduled window
-      </label>
-      <div className={`grid gap-3 sm:grid-cols-2 ${enabled ? '' : 'pointer-events-none opacity-50'}`}>
-        <div><label className="label">Starts at</label><input type="datetime-local" className="input" value={startAt} onChange={(e) => setStartAt(e.target.value)} /></div>
-        <div><label className="label">Ends at</label><input type="datetime-local" className="input" value={endAt} onChange={(e) => setEndAt(e.target.value)} /></div>
-      </div>
-      <p className="text-xs text-slate-400">Times use this computer's timezone. Students who already started may finish; new starts are blocked outside the window.</p>
-      <div className="flex items-center gap-3">
-        <button className="btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save schedule'}</button>
-        {msg && <span className="text-sm text-green-700">{msg}</span>}
-      </div>
+      {domains.map((d) => {
+        const s = sched[d];
+        const live = s.enabled && (!s.startAt || new Date(s.startAt) <= new Date()) && (!s.endAt || new Date(s.endAt) >= new Date());
+        return (
+          <div key={d} className="card space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold">{d} <span className={`ml-2 rounded-full px-2 py-0.5 text-xs font-medium ${live ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}`}>{live ? 'OPEN — students can start' : s.enabled ? 'enabled (scheduled)' : 'closed'}</span></h3>
+              <label className="flex items-center gap-2 text-sm font-medium">
+                <input type="checkbox" checked={s.enabled} onChange={(e) => upd(d, { enabled: e.target.checked })} className="h-4 w-4 accent-teal-600" /> Enable
+              </label>
+            </div>
+            <div className={`grid gap-3 sm:grid-cols-2 ${s.enabled ? '' : 'pointer-events-none opacity-40'}`}>
+              <div><label className="label">Starts at (optional)</label><input type="datetime-local" className="input" value={s.startAt} onChange={(e) => upd(d, { startAt: e.target.value })} /></div>
+              <div><label className="label">Ends at (optional)</label><input type="datetime-local" className="input" value={s.endAt} onChange={(e) => upd(d, { endAt: e.target.value })} /></div>
+            </div>
+            <p className="text-xs text-slate-400">Leave times blank + Enable to open the exam immediately for {d} students. Times use this computer's timezone.</p>
+            <button className="btn-primary" onClick={() => save(d)}>Save {d}</button>
+          </div>
+        );
+      })}
     </div>
   );
 }

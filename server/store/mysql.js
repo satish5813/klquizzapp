@@ -129,6 +129,7 @@ export async function makeMysqlDb() {
         return r[0] ? toAttempt(r[0]) : null;
       },
       remove: async (id) => { await q('DELETE FROM attempts WHERE id=?', [id]); },
+      clearAll: async () => { await q('DELETE FROM attempts'); },
       byStudent: async (studentId) => (await q('SELECT * FROM attempts WHERE student_id=?', [studentId])).map(toAttempt),
     },
 

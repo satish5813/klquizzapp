@@ -117,25 +117,37 @@ app.post('/api/admin/generate/:id/discard', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-// ============ Admin: exam schedule ============
-async function scheduleStatus() {
-  const s = await db.settings.get('schedule');
-  if (!s?.enabled) return { open: true, enabled: false };
+// ============ Admin: per-domain exam schedule ============
+// Exams are CLOSED by default. A domain's exam opens only when the admin enables
+// its schedule (optionally within a start/end window).
+async function scheduleStatusFor(domain) {
+  const all = (await db.settings.get('schedules')) || {};
+  const key = Object.keys(all).find((k) => normDomain(k) === normDomain(domain));
+  const s = key ? all[key] : null;
+  if (!s || !s.enabled) return { open: false, reason: 'not_scheduled', domain };
   const now = Date.now();
-  if (s.startAt && now < Date.parse(s.startAt)) return { open: false, enabled: true, reason: 'not_started', startAt: s.startAt, endAt: s.endAt };
-  if (s.endAt && now > Date.parse(s.endAt)) return { open: false, enabled: true, reason: 'closed', startAt: s.startAt, endAt: s.endAt };
-  return { open: true, enabled: true, startAt: s.startAt, endAt: s.endAt };
+  if (s.startAt && now < Date.parse(s.startAt)) return { open: false, reason: 'not_started', startAt: s.startAt, endAt: s.endAt, domain };
+  if (s.endAt && now > Date.parse(s.endAt)) return { open: false, reason: 'closed', startAt: s.startAt, endAt: s.endAt, domain };
+  return { open: true, reason: 'open', startAt: s.startAt, endAt: s.endAt, domain };
 }
 
-app.get('/api/admin/schedule', requireAdmin, async (_req, res) =>
-  res.json((await db.settings.get('schedule')) || { enabled: false, startAt: null, endAt: null }));
+app.get('/api/admin/schedules', requireAdmin, async (_req, res) => {
+  const schedules = (await db.settings.get('schedules')) || {};
+  const domains = [...new Set((await db.students.all()).map((s) => s.domain).filter(Boolean))].sort();
+  res.json({ schedules, domains });
+});
 
-app.post('/api/admin/schedule', requireAdmin, async (req, res) => {
+app.post('/api/admin/schedules', requireAdmin, async (req, res) => {
+  const domain = String(req.body?.domain || '').trim();
+  if (!domain) return res.status(400).json({ error: 'Domain is required' });
   const enabled = !!req.body?.enabled;
   const startAt = req.body?.startAt ? new Date(req.body.startAt).toISOString() : null;
   const endAt = req.body?.endAt ? new Date(req.body.endAt).toISOString() : null;
   if (enabled && startAt && endAt && Date.parse(endAt) <= Date.parse(startAt)) return res.status(400).json({ error: 'End time must be after start time' });
-  res.json(await db.settings.set('schedule', { enabled, startAt, endAt }));
+  const all = (await db.settings.get('schedules')) || {};
+  all[domain] = { enabled, startAt, endAt };
+  await db.settings.set('schedules', all);
+  res.json({ domain, ...all[domain] });
 });
 
 /** Import model/sample MCQs directly (no AI). */
@@ -278,6 +290,13 @@ app.post('/api/admin/attempts/:id/reopen', requireAdmin, async (req, res) => {
   res.json({ ok: true, message: 'Attempt cleared. The student can log in and take the exam again.' });
 });
 
+/** Delete ALL exam attempts (fresh start). Students keep their roster; questions stay. */
+app.post('/api/admin/attempts/clear-all', requireAdmin, async (_req, res) => {
+  const n = (await db.attempts.all()).length;
+  await db.attempts.clearAll();
+  res.json({ ok: true, cleared: n });
+});
+
 app.get('/api/admin/report/questions', requireAdmin, async (_req, res) => {
   const subs = (await db.attempts.all()).filter((a) => a.status === 'submitted');
   const byId = new Map((await db.questions.all()).map((q) => [q.id, q]));
@@ -311,7 +330,7 @@ app.post('/api/login', async (req, res) => {
     student: { registrationNumber: student.registrationNumber, name: student.name, branch: student.branch, section: student.section, domain: student.domain || '' },
     attempt: done ? { state: 'completed', attemptId: done.id, status: done.status, score: done.score ?? 0, total: done.total, percentage: pct(done.score, done.total) }
       : inProgress ? { state: 'in_progress', attemptId: inProgress.id } : { state: 'none' },
-    quizSize: QUIZ_SIZE, durationMin: QUIZ_DURATION_MIN, schedule: await scheduleStatus(),
+    quizSize: QUIZ_SIZE, durationMin: QUIZ_DURATION_MIN, schedule: await scheduleStatusFor(student.domain),
   });
 });
 
@@ -326,12 +345,14 @@ app.post('/api/exam/start', async (req, res) => {
   if (done) return res.json({ completed: true, attemptId: done.id });
   const inProgress = mine.find((a) => a.status === 'in_progress');
   if (inProgress) return res.json({ attemptId: inProgress.id, total: inProgress.total });
-  // New attempts must fall within the scheduled exam window (if scheduling is on).
-  const sch = await scheduleStatus();
+  // The student's DOMAIN exam must be scheduled + open.
+  const sch = await scheduleStatusFor(student.domain);
   if (!sch.open) return res.status(403).json({
     error: sch.reason === 'not_started'
-      ? `The exam has not started yet. It opens at ${new Date(sch.startAt).toLocaleString()}.`
-      : 'The exam window has closed.',
+      ? `Your ${student.domain || ''} exam has not started yet. It opens at ${new Date(sch.startAt).toLocaleString()}.`
+      : sch.reason === 'closed'
+        ? `Your ${student.domain || ''} exam window has closed.`
+        : `No exam is scheduled for your domain${student.domain ? ` (${student.domain})` : ''} yet. Please wait for the coordinator.`,
     schedule: sch,
   });
   // Domain-specific: a student only gets questions from their Hackathon Domain.

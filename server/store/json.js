@@ -83,6 +83,7 @@ export const jsonDb = {
       return cur[i];
     },
     remove: async (id) => write('attempts', read('attempts').filter((a) => a.id !== id)),
+    clearAll: async () => write('attempts', []),
     byStudent: async (studentId) => read('attempts').filter((a) => a.studentId === studentId),
   },
 

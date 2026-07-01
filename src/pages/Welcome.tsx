@@ -29,7 +29,8 @@ export default function Welcome() {
   const s = data.student;
   const a = data.attempt;
   const sch = data.schedule;
-  const blocked = a.state !== 'in_progress' && sch && sch.enabled && !sch.open;
+  // A new attempt is blocked unless the student's DOMAIN exam is open now.
+  const blocked = a.state !== 'in_progress' && sch && !sch.open;
 
   if (a.state === 'completed') {
     const terminated = a.status === 'terminated';
@@ -48,13 +49,17 @@ export default function Welcome() {
   if (blocked) {
     return (
       <div className="card mx-auto max-w-lg border-2 border-blue-200 text-center">
-        <p className="text-5xl">⏳</p>
-        <h1 className="mt-2 text-xl font-bold text-blue-700">{sch.reason === 'closed' ? 'Exam closed' : 'Exam not started yet'}</h1>
-        <p className="mt-1 text-sm text-slate-600">{s.name} · {s.registrationNumber}</p>
+        <p className="text-5xl">{sch.reason === 'closed' ? '🔒' : sch.reason === 'not_scheduled' ? '🗓️' : '⏳'}</p>
+        <h1 className="mt-2 text-xl font-bold text-blue-700">
+          {sch.reason === 'closed' ? 'Exam closed' : sch.reason === 'not_scheduled' ? 'No exam scheduled' : 'Exam not started yet'}
+        </h1>
+        <p className="mt-1 text-sm text-slate-600">{s.name} · {s.domain || '—'}</p>
         <p className="mt-3 text-sm text-slate-600">
           {sch.reason === 'closed'
-            ? `The exam window closed${sch.endAt ? ' at ' + new Date(sch.endAt).toLocaleString() : ''}.`
-            : `The exam opens at ${sch.startAt ? new Date(sch.startAt).toLocaleString() : 'the scheduled time'}. Please come back then.`}
+            ? `Your ${s.domain || ''} exam window closed${sch.endAt ? ' at ' + new Date(sch.endAt).toLocaleString() : ''}.`
+            : sch.reason === 'not_scheduled'
+              ? `There is no exam scheduled for your domain${s.domain ? ` (${s.domain})` : ''} yet. Please check with your coordinator.`
+              : `Your ${s.domain || ''} exam opens at ${sch.startAt ? new Date(sch.startAt).toLocaleString() : 'the scheduled time'}. Please come back then.`}
         </p>
         <div className="mt-4 flex justify-center gap-2">
           <button className="btn-ghost" onClick={() => window.location.reload()}>Refresh</button>
