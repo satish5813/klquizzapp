@@ -1,17 +1,17 @@
-# This repo holds the API server AND the React client. On the Hostinger VPS we
-# host ONLY the API server — the client is deployed separately to Vercel.
-# This config makes Nixpacks skip the frontend build and just run the API.
+# One Coolify app serves BOTH the API and the student client (same HTTPS origin).
+# Build the React client (→ dist), then run the API server which serves dist.
 providers = ["node"]
 
 [variables]
 NIXPACKS_NODE_VERSION = "22"
 
 [phases.install]
-cmds = ["npm install --omit=dev"]
+# full install (dev deps needed to build the client with vite/tsc)
+cmds = ["npm ci"]
 
-# No build step for the API (skips the frontend's `tsc && vite build`).
 [phases.build]
-cmds = ["echo 'API-only deploy — no frontend build'"]
+# builds the student client into ./dist (served by the server)
+cmds = ["npm run build"]
 
 [start]
 cmd = "node server/index.js"

@@ -1,6 +1,9 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { initStore } from './db.js';
 import { shuffle, normalizeQuestion } from './util.js';
 import { estimate, generateBank, extractMcqs } from './claude.js';
@@ -445,5 +448,14 @@ app.get('/api/result/:attemptId', async (req, res) => {
   });
   res.json({ score: attempt.score ?? 0, total: attempt.total, percentage: pct(attempt.score, attempt.total), status: attempt.status, terminated, reason: attempt.reason || '', review });
 });
+
+// Serve the built student client (same origin as the API) if it's present.
+// Students open https://<this-server>/ and get the exam app; /api/* stays the API.
+const clientDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+if (fs.existsSync(path.join(clientDir, 'index.html'))) {
+  app.use(express.static(clientDir));
+  app.get(/^(?!\/api\/).*/, (_req, res) => res.sendFile(path.join(clientDir, 'index.html')));
+  console.log('[client] serving student app from', clientDir);
+}
 
 app.listen(PORT, () => console.log(`[${APP_NAME}] server on http://localhost:${PORT}  (model: ${MODEL}, store: ${db.driver})`));
