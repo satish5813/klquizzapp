@@ -28,6 +28,8 @@ const requireAdmin = (req, res, next) => {
 const pct = (score, total) => Math.round(((score ?? 0) / total) * 100);
 // Normalize a domain label so "Java Core", "JavaCore", "java core" all match.
 const normDomain = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+// A screen is considered "still active" if it pinged within this window.
+const SESSION_ACTIVE_MS = 90_000;
 
 // In-memory question bank cache — avoids a full questions read on every
 // start/quiz/submit, so the API scales to thousands of concurrent students.
@@ -366,9 +368,10 @@ app.post('/api/login', async (req, res) => {
   });
 });
 
-/** Begin the exam (one attempt per registration number). */
+/** Begin the exam (one attempt per registration number; one active screen at a time). */
 app.post('/api/exam/start', async (req, res) => {
   const registrationNumber = String(req.body?.registrationNumber || '').trim();
+  const incomingSid = String(req.body?.sessionId || '');
   const student = await db.students.byRegNo(registrationNumber);
   if (!student) return res.status(404).json({ error: 'Registration number not found.' });
   if (student.active === false) return res.status(403).json({ error: 'Your account is deactivated. Please contact the exam coordinator.' });
@@ -376,7 +379,16 @@ app.post('/api/exam/start', async (req, res) => {
   const done = mine.find((a) => a.status === 'submitted' || a.status === 'terminated');
   if (done) return res.json({ completed: true, attemptId: done.id });
   const inProgress = mine.find((a) => a.status === 'in_progress');
-  if (inProgress) return res.json({ attemptId: inProgress.id, total: inProgress.total });
+  if (inProgress) {
+    // single active screen: block a second device while the first is live (heartbeat fresh)
+    const sessionActive = inProgress.lastSeen && (Date.now() - Date.parse(inProgress.lastSeen) < SESSION_ACTIVE_MS);
+    if (sessionActive && incomingSid !== inProgress.sessionId) {
+      return res.status(409).json({ openElsewhere: true, error: 'This registration number is already taking the exam on another screen/device. Close it, then wait about a minute and try again.' });
+    }
+    const sid = incomingSid && incomingSid === inProgress.sessionId ? inProgress.sessionId : crypto.randomUUID();
+    await db.attempts.update(inProgress.id, { sessionId: sid, lastSeen: new Date().toISOString() });
+    return res.json({ attemptId: inProgress.id, total: inProgress.total, sessionId: sid });
+  }
   // The student's DOMAIN exam must be scheduled + open.
   const sch = await scheduleStatusFor(student.domain);
   if (!sch.open) return res.status(403).json({
@@ -397,21 +409,40 @@ app.post('/api/exam/start', async (req, res) => {
   });
   const size = Math.min(QUIZ_SIZE, pool.length);
   const picked = shuffle(pool).slice(0, size);
+  const sid = crypto.randomUUID();
   const attempt = await db.attempts.add({
     id: crypto.randomUUID(), studentId: student.id, questionIds: picked.map((q) => q.id),
-    answers: {}, score: null, total: size, status: 'in_progress', reason: '', startedAt: new Date().toISOString(), submittedAt: null,
+    answers: {}, score: null, total: size, status: 'in_progress', reason: '',
+    sessionId: sid, lastSeen: new Date().toISOString(), startedAt: new Date().toISOString(), submittedAt: null,
   });
-  res.json({ attemptId: attempt.id, total: size });
+  res.json({ attemptId: attempt.id, total: size, sessionId: sid });
 });
 
 // ============ Exam: questions / submit / terminate / result ============
 app.get('/api/quiz/:attemptId', async (req, res) => {
   const attempt = await db.attempts.get(req.params.attemptId);
   if (!attempt) return res.status(404).json({ error: 'Attempt not found' });
+  // one active screen: block if another live session owns this attempt
+  const sid = String(req.query.s || req.headers['x-exam-session'] || '');
+  if (attempt.sessionId && sid !== attempt.sessionId) {
+    const active = attempt.lastSeen && (Date.now() - Date.parse(attempt.lastSeen) < SESSION_ACTIVE_MS);
+    if (active) return res.status(409).json({ openElsewhere: true, error: 'This exam is open on another screen.' });
+  }
+  if (sid && sid === attempt.sessionId) await db.attempts.update(attempt.id, { lastSeen: new Date().toISOString() });
   const { byId } = await getBank();
   const questions = attempt.questionIds.map((id) => byId.get(id)).filter(Boolean)
     .map((q) => ({ id: q.id, question: q.question, options: q.options, topic: q.topic, difficulty: q.difficulty }));
   res.json({ attemptId: attempt.id, total: attempt.total, status: attempt.status, startedAt: attempt.startedAt, durationMin: QUIZ_DURATION_MIN, questions });
+});
+
+/** Heartbeat — keeps this screen's session alive; 409 if another screen took over. */
+app.post('/api/quiz/:attemptId/ping', async (req, res) => {
+  const attempt = await db.attempts.get(req.params.attemptId);
+  if (!attempt || attempt.status !== 'in_progress') return res.json({ ok: false, done: true });
+  const sid = String(req.body?.sessionId || '');
+  if (attempt.sessionId && sid !== attempt.sessionId) return res.json({ ok: false, openElsewhere: true });
+  await db.attempts.update(attempt.id, { lastSeen: new Date().toISOString() });
+  res.json({ ok: true });
 });
 
 app.post('/api/quiz/:attemptId/submit', async (req, res) => {

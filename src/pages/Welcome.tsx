@@ -18,7 +18,8 @@ export default function Welcome() {
   async function start() {
     setBusy(true); setError('');
     try {
-      const r = await api.post<{ attemptId: string; completed?: boolean }>('/api/exam/start', { registrationNumber: reg });
+      const r = await api.post<{ attemptId: string; completed?: boolean; sessionId?: string }>('/api/exam/start', { registrationNumber: reg, sessionId: sessionStorage.getItem('kl_sid') || '' });
+      if (r.sessionId) sessionStorage.setItem('kl_sid', r.sessionId);
       navigate(r.completed ? `/result/${r.attemptId}` : `/quiz/${r.attemptId}`);
     } catch (e: any) { setError(e.message); setBusy(false); }
   }

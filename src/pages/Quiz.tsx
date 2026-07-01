@@ -16,23 +16,41 @@ export default function Quiz() {
   const [deadline, setDeadline] = useState(0); // epoch ms when the exam auto-submits
   const [remaining, setRemaining] = useState(0); // seconds left
   const [showResume, setShowResume] = useState(false); // full-screen warning overlay
+  const [kicked, setKicked] = useState(false); // opened on another screen
   const [violations, setViolations] = useState(0);
   const violationsRef = useRef(0);
   const endedRef = useRef(false); // true once submitted (stops the guard)
   const submitRef = useRef<() => void>(() => {});
+  const sid = sessionStorage.getItem('kl_sid') || '';
 
   useEffect(() => {
     (async () => {
       try {
-        const res = await api.get<{ questions: QuizQuestion[]; status: string; startedAt: string; durationMin: number }>(`/api/quiz/${attemptId}`);
+        const res = await api.get<{ questions: QuizQuestion[]; status: string; startedAt: string; durationMin: number }>(`/api/quiz/${attemptId}?s=${encodeURIComponent(sid)}`);
         if (res.status !== 'in_progress') { navigate(`/result/${attemptId}`); return; }
         setQuestions(res.questions);
         const dl = new Date(res.startedAt).getTime() + (res.durationMin || 60) * 60_000;
         setDeadline(dl);
         setRemaining(Math.max(0, Math.round((dl - Date.now()) / 1000)));
-      } catch (e: any) { setError(e.message); } finally { setLoading(false); }
+      } catch (e: any) {
+        if (/another screen/i.test(e.message)) setKicked(true); else setError(e.message);
+      } finally { setLoading(false); }
     })();
-  }, [attemptId, navigate]);
+  }, [attemptId, navigate, sid]);
+
+  // --- Heartbeat: keeps this screen's session alive; blocks if opened elsewhere ---
+  useEffect(() => {
+    if (!started) return;
+    const ping = async () => {
+      try {
+        const r = await api.post<{ ok: boolean; openElsewhere?: boolean }>(`/api/quiz/${attemptId}/ping`, { sessionId: sid });
+        if (r.openElsewhere && !endedRef.current) { endedRef.current = true; setKicked(true); }
+      } catch { /* transient network error — ignore */ }
+    };
+    ping();
+    const t = setInterval(ping, 30_000);
+    return () => clearInterval(t);
+  }, [started, attemptId, sid]);
 
   // --- Countdown: auto-submit when time runs out ---
   useEffect(() => {
@@ -106,6 +124,18 @@ export default function Quiz() {
   const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
   if (loading) return <p className="text-sm text-slate-400">Loading exam…</p>;
+
+  if (kicked) {
+    return (
+      <div className="card mx-auto max-w-md border-2 border-red-200 text-center">
+        <p className="text-5xl">🖥️</p>
+        <h1 className="mt-2 text-xl font-bold text-red-700">Opened on another screen</h1>
+        <p className="mt-1 text-sm text-slate-600">This registration number is now taking the exam on another screen or device. Only one screen is allowed at a time, so this window is locked.</p>
+        <button className="btn-ghost mt-4" onClick={() => { sessionStorage.removeItem('kl_reg'); navigate('/'); }}>Close</button>
+      </div>
+    );
+  }
+
   if (error && !started) return <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>;
 
   // Start gate
