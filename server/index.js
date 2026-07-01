@@ -53,6 +53,16 @@ app.post('/api/admin/estimate', requireAdmin, (req, res) => {
   res.json(estimate(Math.max(1, Math.min(50000, Number(req.body?.count) || 1000))));
 });
 
+/** Tag a domain onto existing questions (default: only those without a domain). */
+app.post('/api/admin/questions/assign-domain', requireAdmin, async (req, res) => {
+  const domain = String(req.body?.domain || '').trim();
+  if (!domain) return res.status(400).json({ error: 'Provide a domain' });
+  const onlyUntagged = req.body?.all ? false : true;
+  const changed = await db.questions.assignDomain(domain, onlyUntagged);
+  invalidateBank();
+  res.json({ changed, domain });
+});
+
 const jobs = new Map();
 app.post('/api/admin/generate', requireAdmin, async (req, res) => {
   // Key may come from the admin desktop app (preferred) or the server env.

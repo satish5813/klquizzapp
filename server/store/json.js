@@ -30,6 +30,14 @@ export const jsonDb = {
     addMany: async (items) => { const cur = read('questions'); cur.push(...items); write('questions', cur); return cur.length; },
     clear: async () => write('questions', []),
     normSet: async () => new Set(read('questions').map((q) => q.norm)),
+    // Tag a domain onto questions (all, or only those currently untagged). Returns count changed.
+    assignDomain: async (domain, onlyUntagged = true) => {
+      const cur = read('questions');
+      let n = 0;
+      for (const q of cur) { if (onlyUntagged && q.domain) continue; q.domain = domain; n++; }
+      write('questions', cur);
+      return n;
+    },
   },
 
   students: {

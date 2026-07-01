@@ -330,6 +330,12 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
   const mcqPdfRef = useRef<HTMLInputElement>(null);
 
   function saveKey() { settings.saveClaudeKey(claudeKey.trim()); setKeyMsg('Saved on this computer.'); setTimeout(() => setKeyMsg(''), 2500); }
+  async function assignUntagged() {
+    if (!domain.trim()) { setError('Enter a domain first.'); return; }
+    if (!window.confirm(`Tag all questions that have NO domain yet with "${domain}"?`)) return;
+    try { const r = await api.post<{ changed: number }>('/api/admin/questions/assign-domain', { domain: domain.trim() }); onChanged(); window.alert(`Tagged ${r.changed} question(s) as "${domain}".`); }
+    catch (e: any) { setError(e.message); }
+  }
 
   // Upload a PDF that already contains MCQs → Claude structures them (background job) → into the import box.
   async function onMcqPdf(e: React.ChangeEvent<HTMLInputElement>) {
@@ -438,8 +444,14 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
       <div className="card space-y-2">
         <h2 className="font-semibold">Exam domain</h2>
         <p className="text-xs text-slate-500">Questions you generate / import below are tagged with this domain. A student only gets questions from <b>their</b> Hackathon Domain (e.g. <code>Java Core</code>, <code>Python</code>).</p>
-        <input className="input max-w-xs" value={domain} onChange={(e) => { setDomain(e.target.value); localStorage.setItem('kl_gen_domain', e.target.value); }} placeholder="e.g. Java Core" list="domain-list" />
-        <datalist id="domain-list">{Object.keys(bank.byDomain || {}).map((d) => <option key={d} value={d} />)}</datalist>
+        <div className="flex items-center gap-2">
+          <input className="input max-w-xs" value={domain} onChange={(e) => { setDomain(e.target.value); localStorage.setItem('kl_gen_domain', e.target.value); }} placeholder="e.g. Java Core" list="domain-list" />
+          <datalist id="domain-list">{Object.keys(bank.byDomain || {}).map((d) => <option key={d} value={d} />)}</datalist>
+          {bank.byDomain && bank.byDomain['(none)'] > 0 && (
+            <button className="btn-ghost" onClick={assignUntagged}>Tag {bank.byDomain['(none)']} untagged → {domain || '…'}</button>
+          )}
+        </div>
+        {bank.byDomain && bank.byDomain['(none)'] > 0 && <p className="text-xs text-amber-600">{bank.byDomain['(none)']} question(s) have no domain — tag them so students in that domain receive them.</p>}
       </div>
 
       <div className="card space-y-2">

@@ -75,6 +75,12 @@ export async function makeMysqlDb() {
       },
       clear: async () => { await q('DELETE FROM questions'); },
       normSet: async () => new Set((await q('SELECT norm FROM questions')).map((r) => r.norm)),
+      assignDomain: async (domain, onlyUntagged = true) => {
+        const r = onlyUntagged
+          ? await q("UPDATE questions SET domain=? WHERE domain='' OR domain IS NULL", [domain])
+          : await q('UPDATE questions SET domain=?', [domain]);
+        return r.affectedRows || 0;
+      },
     },
 
     students: {
