@@ -698,10 +698,15 @@ const isoToLocalInput = (iso: string | null) => {
 };
 interface Sched { enabled: boolean; startAt: string; endAt: string }
 function ScheduleTab({ setError }: { setError: (s: string) => void }) {
-  const [domains, setDomains] = useState<string[]>([]);
+  const [studentDomains, setStudentDomains] = useState<string[]>([]);
   const [sched, setSched] = useState<Record<string, Sched>>({});
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [msg, setMsg] = useState('');
+  // create form
+  const [nDomain, setNDomain] = useState('');
+  const [nEnabled, setNEnabled] = useState(true);
+  const [nStart, setNStart] = useState('');
+  const [nEnd, setNEnd] = useState('');
 
   async function load() {
     try {
@@ -710,38 +715,64 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
         api.get<{ byDomain?: Record<string, number> }>('/api/admin/bank/stats'),
       ]);
       const s: Record<string, Sched> = {};
-      for (const d of r.domains) {
+      // union of existing schedule entries + student domains
+      for (const d of [...new Set([...Object.keys(r.schedules || {}), ...(r.domains || [])])]) {
         const e = r.schedules[d] || {};
         s[d] = { enabled: !!e.enabled, startAt: isoToLocalInput(e.startAt || null), endAt: isoToLocalInput(e.endAt || null) };
       }
-      setDomains(r.domains); setSched(s); setCounts(stats.byDomain || {});
+      setStudentDomains(r.domains || []); setSched(s); setCounts(stats.byDomain || {});
     } catch (e: any) { setError(e.message); }
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, []);
 
   const upd = (d: string, patch: Partial<Sched>) => setSched((s) => ({ ...s, [d]: { ...s[d], ...patch } }));
+  const toIso = (v: string) => (v ? new Date(v).toISOString() : null);
   async function save(d: string) {
     const s = sched[d]; setMsg(''); setError('');
     try {
-      await api.post('/api/admin/schedules', {
-        domain: d, enabled: s.enabled,
-        startAt: s.enabled && s.startAt ? new Date(s.startAt).toISOString() : null,
-        endAt: s.enabled && s.endAt ? new Date(s.endAt).toISOString() : null,
-      });
-      setMsg(`"${d}" saved.`); setTimeout(() => setMsg(''), 2500);
+      await api.post('/api/admin/schedules', { domain: d, enabled: s.enabled, startAt: s.enabled ? toIso(s.startAt) : null, endAt: s.enabled ? toIso(s.endAt) : null });
+      setMsg(`"${d}" saved.`); setTimeout(() => setMsg(''), 2500); load();
     } catch (e: any) { setError(e.message); }
   }
+  async function create() {
+    if (!nDomain.trim()) { setError('Enter a domain name for the new schedule.'); return; }
+    setError('');
+    try {
+      await api.post('/api/admin/schedules', { domain: nDomain.trim(), enabled: nEnabled, startAt: nEnabled ? toIso(nStart) : null, endAt: nEnabled ? toIso(nEnd) : null });
+      setNDomain(''); setNStart(''); setNEnd(''); setNEnabled(true); setMsg('Schedule created.'); setTimeout(() => setMsg(''), 2500); load();
+    } catch (e: any) { setError(e.message); }
+  }
+  async function del(d: string) {
+    if (!window.confirm(`Delete the schedule for "${d}"? Its exam will be closed.`)) return;
+    try { await api.post('/api/admin/schedules/delete', { domain: d }); load(); } catch (e: any) { setError(e.message); }
+  }
 
-  if (!domains.length) return <div className="card text-sm text-slate-400">No student domains found yet. Import a roster that has a Hackathon Domain column, then come back.</div>;
+  const rows = Object.keys(sched).sort();
 
   return (
     <div className="space-y-4">
       <div className="card">
-        <h2 className="font-semibold">Exam schedule (per domain)</h2>
-        <p className="text-sm text-slate-500">Each domain's exam is <b>closed</b> until you enable it here. Enable a domain (optionally with a start/end window) so only that domain's students can start. {msg && <span className="ml-2 font-medium text-green-700">{msg}</span>}</p>
+        <h2 className="font-semibold">Exam schedules</h2>
+        <p className="text-sm text-slate-500">Each domain's exam is <b>closed</b> until a schedule enables it. Create, edit, or delete schedules below — only students of an <b>open</b> domain can start. {msg && <span className="ml-2 font-medium text-green-700">{msg}</span>}</p>
       </div>
-      {domains.map((d) => {
+
+      {/* CREATE */}
+      <div className="card space-y-3">
+        <h3 className="font-semibold">➕ Create a schedule</h3>
+        <div className="flex flex-wrap items-end gap-3">
+          <div><label className="label">Domain</label><input className="input max-w-[200px]" value={nDomain} onChange={(e) => setNDomain(e.target.value)} placeholder="e.g. Python" list="sched-domains" />
+            <datalist id="sched-domains">{studentDomains.map((d) => <option key={d} value={d} />)}</datalist></div>
+          <div><label className="label">Starts (optional)</label><input type="datetime-local" className="input" value={nStart} onChange={(e) => setNStart(e.target.value)} /></div>
+          <div><label className="label">Ends (optional)</label><input type="datetime-local" className="input" value={nEnd} onChange={(e) => setNEnd(e.target.value)} /></div>
+          <label className="flex items-center gap-2 pb-2 text-sm font-medium"><input type="checkbox" checked={nEnabled} onChange={(e) => setNEnabled(e.target.checked)} className="h-4 w-4 accent-teal-600" /> Enabled</label>
+          <button className="btn-primary" onClick={create}>Create</button>
+        </div>
+        <p className="text-xs text-slate-400">Tip: domain must match the students' Hackathon Domain exactly. Blank times + Enabled = open now.</p>
+      </div>
+
+      {!rows.length && <div className="card text-sm text-slate-400">No schedules yet. Create one above.</div>}
+      {rows.map((d) => {
         const s = sched[d];
         const live = s.enabled && (!s.startAt || new Date(s.startAt) <= new Date()) && (!s.endAt || new Date(s.endAt) >= new Date());
         return (
@@ -761,7 +792,10 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
               <div><label className="label">Ends at (optional)</label><input type="datetime-local" className="input" value={s.endAt} onChange={(e) => upd(d, { endAt: e.target.value })} /></div>
             </div>
             <p className="text-xs text-slate-400">Leave times blank + Enable to open the exam immediately for {d} students. Times use this computer's timezone.</p>
-            <button className="btn-primary" onClick={() => save(d)}>Save {d}</button>
+            <div className="flex items-center gap-2">
+              <button className="btn-primary" onClick={() => save(d)}>Save {d}</button>
+              <button className="btn-danger" onClick={() => del(d)}>Delete schedule</button>
+            </div>
           </div>
         );
       })}

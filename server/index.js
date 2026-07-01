@@ -170,6 +170,15 @@ app.post('/api/admin/schedules', requireAdmin, async (req, res) => {
   res.json({ domain, ...all[domain] });
 });
 
+/** Delete a domain's schedule entry. */
+app.post('/api/admin/schedules/delete', requireAdmin, async (req, res) => {
+  const domain = String(req.body?.domain || '').trim();
+  const all = (await db.settings.get('schedules')) || {};
+  const key = Object.keys(all).find((k) => normDomain(k) === normDomain(domain));
+  if (key) { delete all[key]; await db.settings.set('schedules', all); }
+  res.json({ ok: true, deleted: !!key });
+});
+
 /** Import model/sample MCQs directly (no AI). */
 app.post('/api/admin/import', requireAdmin, async (req, res) => {
   const raw = Array.isArray(req.body?.questions) ? req.body.questions : null;
