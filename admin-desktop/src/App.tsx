@@ -698,15 +698,12 @@ const isoToLocalInput = (iso: string | null) => {
 };
 interface Sched { enabled: boolean; startAt: string; endAt: string }
 function ScheduleTab({ setError }: { setError: (s: string) => void }) {
-  const [studentDomains, setStudentDomains] = useState<string[]>([]);
+  const [domains, setDomains] = useState<string[]>([]);
   const [sched, setSched] = useState<Record<string, Sched>>({});
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const [selected, setSelected] = useState('');
   const [msg, setMsg] = useState('');
-  // create form
-  const [nDomain, setNDomain] = useState('');
-  const [nEnabled, setNEnabled] = useState(true);
-  const [nStart, setNStart] = useState('');
-  const [nEnd, setNEnd] = useState('');
+  const [busy, setBusy] = useState(false);
 
   async function load() {
     try {
@@ -714,91 +711,112 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
         api.get<{ schedules: Record<string, any>; domains: string[] }>('/api/admin/schedules'),
         api.get<{ byDomain?: Record<string, number> }>('/api/admin/bank/stats'),
       ]);
+      const all = [...new Set([...Object.keys(r.schedules || {}), ...(r.domains || [])])].sort();
       const s: Record<string, Sched> = {};
-      // union of existing schedule entries + student domains
-      for (const d of [...new Set([...Object.keys(r.schedules || {}), ...(r.domains || [])])]) {
+      for (const d of all) {
         const e = r.schedules[d] || {};
         s[d] = { enabled: !!e.enabled, startAt: isoToLocalInput(e.startAt || null), endAt: isoToLocalInput(e.endAt || null) };
       }
-      setStudentDomains(r.domains || []); setSched(s); setCounts(stats.byDomain || {});
+      setDomains(all); setSched(s); setCounts(stats.byDomain || {});
+      setSelected((prev) => (prev && all.includes(prev) ? prev : all[0] || ''));
     } catch (e: any) { setError(e.message); }
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, []);
 
-  const upd = (d: string, patch: Partial<Sched>) => setSched((s) => ({ ...s, [d]: { ...s[d], ...patch } }));
+  const cur = selected ? sched[selected] : undefined;
   const toIso = (v: string) => (v ? new Date(v).toISOString() : null);
-  async function save(d: string) {
-    const s = sched[d]; setMsg(''); setError('');
+  const isLive = (d: string) => { const s = sched[d]; return s && s.enabled && (!s.startAt || new Date(s.startAt) <= new Date()) && (!s.endAt || new Date(s.endAt) >= new Date()); };
+  const upd = (patch: Partial<Sched>) => setSched((s) => ({ ...s, [selected]: { ...s[selected], ...patch } }));
+
+  async function apply(enabled: boolean) {
+    if (!selected || !cur) return;
+    setBusy(true); setError(''); setMsg('');
     try {
-      await api.post('/api/admin/schedules', { domain: d, enabled: s.enabled, startAt: s.enabled ? toIso(s.startAt) : null, endAt: s.enabled ? toIso(s.endAt) : null });
-      setMsg(`"${d}" saved.`); setTimeout(() => setMsg(''), 2500); load();
-    } catch (e: any) { setError(e.message); }
+      await api.post('/api/admin/schedules', { domain: selected, enabled, startAt: enabled ? toIso(cur.startAt) : null, endAt: enabled ? toIso(cur.endAt) : null });
+      setMsg(enabled ? `${selected} exam activated.` : `${selected} exam disabled.`); setTimeout(() => setMsg(''), 3000);
+      await load();
+    } catch (e: any) { setError(e.message); } finally { setBusy(false); }
   }
-  async function create() {
-    if (!nDomain.trim()) { setError('Enter a domain name for the new schedule.'); return; }
-    setError('');
-    try {
-      await api.post('/api/admin/schedules', { domain: nDomain.trim(), enabled: nEnabled, startAt: nEnabled ? toIso(nStart) : null, endAt: nEnabled ? toIso(nEnd) : null });
-      setNDomain(''); setNStart(''); setNEnd(''); setNEnabled(true); setMsg('Schedule created.'); setTimeout(() => setMsg(''), 2500); load();
-    } catch (e: any) { setError(e.message); }
-  }
-  async function del(d: string) {
-    if (!window.confirm(`Delete the schedule for "${d}"? Its exam will be closed.`)) return;
-    try { await api.post('/api/admin/schedules/delete', { domain: d }); load(); } catch (e: any) { setError(e.message); }
+  async function del() {
+    if (!selected || !window.confirm(`Delete the "${selected}" schedule? Its exam will be closed.`)) return;
+    try { await api.post('/api/admin/schedules/delete', { domain: selected }); await load(); } catch (e: any) { setError(e.message); }
   }
 
-  const rows = Object.keys(sched).sort();
+  if (!domains.length) return <div className="card text-sm text-slate-400">No domains yet. Import a roster with a Hackathon Domain column first.</div>;
+
+  const qn = counts[selected] || 0;
+  const live = isLive(selected);
 
   return (
-    <div className="space-y-4">
-      <div className="card">
-        <h2 className="font-semibold">Exam schedules</h2>
-        <p className="text-sm text-slate-500">Each domain's exam is <b>closed</b> until a schedule enables it. Create, edit, or delete schedules below — only students of an <b>open</b> domain can start. {msg && <span className="ml-2 font-medium text-green-700">{msg}</span>}</p>
+    <div className="space-y-5">
+      {/* header */}
+      <div className="rounded-2xl bg-gradient-to-r from-teal-600 to-emerald-600 px-6 py-4 text-white shadow-sm">
+        <h2 className="text-lg font-bold">Exam Schedule</h2>
+        <p className="text-sm text-teal-50/90">Choose a domain, then Activate or Disable its exam. Only students of an <b>active</b> domain can start.</p>
       </div>
 
-      {/* CREATE */}
-      <div className="card space-y-3">
-        <h3 className="font-semibold">➕ Create a schedule</h3>
-        <div className="flex flex-wrap items-end gap-3">
-          <div><label className="label">Domain</label><input className="input max-w-[200px]" value={nDomain} onChange={(e) => setNDomain(e.target.value)} placeholder="e.g. Python" list="sched-domains" />
-            <datalist id="sched-domains">{studentDomains.map((d) => <option key={d} value={d} />)}</datalist></div>
-          <div><label className="label">Starts (optional)</label><input type="datetime-local" className="input" value={nStart} onChange={(e) => setNStart(e.target.value)} /></div>
-          <div><label className="label">Ends (optional)</label><input type="datetime-local" className="input" value={nEnd} onChange={(e) => setNEnd(e.target.value)} /></div>
-          <label className="flex items-center gap-2 pb-2 text-sm font-medium"><input type="checkbox" checked={nEnabled} onChange={(e) => setNEnabled(e.target.checked)} className="h-4 w-4 accent-teal-600" /> Enabled</label>
-          <button className="btn-primary" onClick={create}>Create</button>
+      {/* control panel */}
+      <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Select domain exam</label>
+        <div className="flex flex-wrap items-center gap-3">
+          <select className="rounded-xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-base font-semibold text-slate-800 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+            value={selected} onChange={(e) => setSelected(e.target.value)}>
+            {domains.map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+          <span className={`rounded-full px-3 py-1 text-sm font-semibold ${live ? 'bg-teal-100 text-teal-700' : 'bg-slate-100 text-slate-500'}`}>{live ? '● Active' : '○ Disabled'}</span>
+          <span className={`rounded-full px-3 py-1 text-sm font-medium ${qn > 0 ? 'bg-slate-100 text-slate-600' : 'bg-red-100 text-red-700'}`}>{qn} question{qn === 1 ? '' : 's'}</span>
+          {msg && <span className="text-sm font-medium text-teal-700">{msg}</span>}
         </div>
-        <p className="text-xs text-slate-400">Tip: domain must match the students' Hackathon Domain exactly. Blank times + Enabled = open now.</p>
+
+        {qn === 0 && <div className="mt-4 rounded-xl bg-red-50 px-4 py-2.5 text-sm text-red-700">⚠ No questions for <b>{selected}</b> yet — students can't start even when active. Add them in the Question bank tab.</div>}
+
+        {cur && (
+          <>
+            <div className="mt-5 grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Starts at (optional)</label>
+                <input type="datetime-local" className="w-full rounded-xl border border-slate-300 px-3 py-2.5 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" value={cur.startAt} onChange={(e) => upd({ startAt: e.target.value })} />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Ends at (optional)</label>
+                <input type="datetime-local" className="w-full rounded-xl border border-slate-300 px-3 py-2.5 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" value={cur.endAt} onChange={(e) => upd({ endAt: e.target.value })} />
+              </div>
+            </div>
+            <p className="mt-2 text-xs text-slate-400">Leave times blank to open immediately. Times use this computer's timezone.</p>
+
+            <div className="mt-5 flex flex-wrap items-center gap-3">
+              <button disabled={busy} onClick={() => apply(true)}
+                className="rounded-xl bg-teal-600 px-6 py-2.5 font-semibold text-white shadow-sm transition hover:bg-teal-700 focus:ring-4 focus:ring-teal-200 disabled:opacity-50">
+                ● Activate exam
+              </button>
+              <button disabled={busy} onClick={() => apply(false)}
+                className="rounded-xl bg-white px-6 py-2.5 font-semibold text-teal-700 ring-1 ring-teal-300 transition hover:bg-teal-50 disabled:opacity-50">
+                ○ Disable exam
+              </button>
+              <button disabled={busy} onClick={del} className="ml-auto text-sm font-medium text-red-600 hover:underline">Delete schedule</button>
+            </div>
+          </>
+        )}
       </div>
 
-      {!rows.length && <div className="card text-sm text-slate-400">No schedules yet. Create one above.</div>}
-      {rows.map((d) => {
-        const s = sched[d];
-        const live = s.enabled && (!s.startAt || new Date(s.startAt) <= new Date()) && (!s.endAt || new Date(s.endAt) >= new Date());
-        return (
-          <div key={d} className="card space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="font-semibold">{d}
-                <span className={`ml-2 rounded-full px-2 py-0.5 text-xs font-medium ${live ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}`}>{live ? 'OPEN — students can start' : s.enabled ? 'enabled (scheduled)' : 'closed'}</span>
-                <span className={`ml-2 rounded-full px-2 py-0.5 text-xs font-medium ${(counts[d] || 0) > 0 ? 'bg-indigo-50 text-indigo-700' : 'bg-red-100 text-red-700'}`}>{counts[d] || 0} question{(counts[d] || 0) === 1 ? '' : 's'}</span>
-              </h3>
-              <label className="flex items-center gap-2 text-sm font-medium">
-                <input type="checkbox" checked={s.enabled} onChange={(e) => upd(d, { enabled: e.target.checked })} className="h-4 w-4 accent-teal-600" /> Enable
-              </label>
-            </div>
-            {!(counts[d] || 0) && <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">⚠ No questions for {d} yet — students can't start even if enabled. Add {d} questions in the Question bank tab first.</p>}
-            <div className={`grid gap-3 sm:grid-cols-2 ${s.enabled ? '' : 'pointer-events-none opacity-40'}`}>
-              <div><label className="label">Starts at (optional)</label><input type="datetime-local" className="input" value={s.startAt} onChange={(e) => upd(d, { startAt: e.target.value })} /></div>
-              <div><label className="label">Ends at (optional)</label><input type="datetime-local" className="input" value={s.endAt} onChange={(e) => upd(d, { endAt: e.target.value })} /></div>
-            </div>
-            <p className="text-xs text-slate-400">Leave times blank + Enable to open the exam immediately for {d} students. Times use this computer's timezone.</p>
-            <div className="flex items-center gap-2">
-              <button className="btn-primary" onClick={() => save(d)}>Save {d}</button>
-              <button className="btn-danger" onClick={() => del(d)}>Delete schedule</button>
-            </div>
-          </div>
-        );
-      })}
+      {/* overview */}
+      <div className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+        <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">All domains</p>
+        <div className="space-y-2">
+          {domains.map((d) => (
+            <button key={d} onClick={() => setSelected(d)}
+              className={`flex w-full items-center justify-between rounded-xl px-4 py-2.5 text-left transition ${selected === d ? 'bg-teal-50 ring-1 ring-teal-200' : 'hover:bg-slate-50'}`}>
+              <span className="font-medium text-slate-800">{d}</span>
+              <span className="flex items-center gap-2">
+                <span className="text-xs text-slate-400">{counts[d] || 0} Q</span>
+                <span className={`h-2.5 w-2.5 rounded-full ${isLive(d) ? 'bg-teal-500' : 'bg-slate-300'}`} />
+                <span className={`w-16 text-right text-xs font-semibold ${isLive(d) ? 'text-teal-700' : 'text-slate-400'}`}>{isLive(d) ? 'Active' : 'Disabled'}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
