@@ -1,8 +1,27 @@
 // Renders MCQ text with code support:
-//  - ```fenced blocks``` → a monospace code block (larger font, preserves whitespace)
-//  - `inline code` → inline monospace
-//  - plain text keeps its line breaks
+//  - literal "\n" / "\t" escape sequences become real newlines/tabs
+//  - ```fenced blocks``` OR any code-looking text  → monospace code block
+//  - `inline code` → inline monospace; prose keeps its line breaks
 import { ReactNode } from 'react';
+
+// turn literal backslash-n / -t / -r (as stored in some generated questions) into real chars
+const unescape = (s: string) =>
+  String(s ?? '').replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\n');
+
+// heuristics: real newline, code punctuation, or clear code constructs (but NOT prose like "class definition")
+const looksLikeCode = (s: string) =>
+  /\n/.test(s) ||
+  /[{};]/.test(s) ||
+  /\b(def|class|void|public|private|static|function)\s+\w+\s*\(/.test(s) ||
+  /(self\.|System\.|console\.|println|printf|=>|->|::|==|!=|\w+\s*=\s*\w)/.test(s);
+
+function CodeBlock({ value }: { value: string }) {
+  return (
+    <pre className="my-1 overflow-x-auto whitespace-pre-wrap break-words rounded-lg bg-slate-900 px-3 py-2 font-mono text-[14px] leading-relaxed text-slate-100">
+      <code>{value}</code>
+    </pre>
+  );
+}
 
 function Inline({ value }: { value: string }) {
   const segs = value.split(/(`[^`]+`)/g);
@@ -18,19 +37,19 @@ function Inline({ value }: { value: string }) {
 }
 
 export default function RichText({ text, className = '' }: { text: string; className?: string }) {
-  const src = String(text ?? '');
+  const src = unescape(text);
   const out: ReactNode[] = [];
   const re = /```[\w+-]*\n?([\s\S]*?)```/g;
   let last = 0, m: RegExpExecArray | null, k = 0;
   while ((m = re.exec(src))) {
-    if (m.index > last) out.push(<Inline key={k++} value={src.slice(last, m.index)} />);
-    out.push(
-      <pre key={k++} className="my-2 overflow-x-auto rounded-lg bg-slate-900 px-4 py-3 font-mono text-[15px] leading-relaxed text-slate-100">
-        <code>{m[1].replace(/\n$/, '')}</code>
-      </pre>,
-    );
+    if (m.index > last) out.push(renderText(src.slice(last, m.index), k++));
+    out.push(<CodeBlock key={k++} value={m[1].replace(/\n$/, '')} />);
     last = re.lastIndex;
   }
-  if (last < src.length) out.push(<Inline key={k++} value={src.slice(last)} />);
+  if (last < src.length) out.push(renderText(src.slice(last), k++));
   return <div className={className}>{out}</div>;
+}
+
+function renderText(seg: string, key: number): ReactNode {
+  return looksLikeCode(seg) ? <CodeBlock key={key} value={seg.trim()} /> : <Inline key={key} value={seg} />;
 }
