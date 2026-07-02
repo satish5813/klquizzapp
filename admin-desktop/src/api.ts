@@ -46,5 +46,7 @@ export interface StudentsPage { rows: Student[]; total: number; page: number; pa
 export interface Attempt { attemptId: string; registrationNumber: string; name: string; branch: string; domain?: string; score: number | null; total: number; percentage: number | null; status: string; reason: string; violations?: number; autoSubmitted?: boolean; ip?: string; startedAt: string; submittedAt: string | null; }
 export interface QuestionRow { id: string; question: string; options: string[]; answerIndex: number; topic: string; difficulty: string; domain?: string; explanation?: string; }
 export interface Ticket { id: string; registrationNumber: string; name: string; message: string; status: string; createdAt: string; }
+export interface Bucket { difficulty?: string; topic?: string; correct: number; total: number; pct: number; }
+export interface Analysis { name: string; registrationNumber: string; domain: string; score: number; total: number; percentage: number; byDifficulty: Bucket[]; byTopic: Bucket[]; strengths: Bucket[]; weaknesses: Bucket[]; }
 export interface QReport { id: string; question: string; topic: string; difficulty: string; answered: number; correct: number; pctCorrect: number | null; }
 export interface ReviewItem { question: string; options: string[]; correctIndex: number; yourIndex: number | null; correct: boolean; explanation: string; }

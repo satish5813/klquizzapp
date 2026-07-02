@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { api, settings, Student, StudentsPage, Attempt, QReport, ReviewItem, QuestionRow, Ticket } from './api';
+import { api, settings, Student, StudentsPage, Attempt, QReport, ReviewItem, QuestionRow, Ticket, Analysis } from './api';
 import { extractPdfText } from './pdf';
 
 type Tab = 'overview' | 'users' | 'bank' | 'questions' | 'schedule' | 'results' | 'report' | 'tickets';
@@ -85,37 +85,43 @@ export default function App() {
 
   return (
     <div className="min-h-screen">
-      <header className="sticky top-0 z-10 border-b border-slate-200 bg-white">
-        <div className="flex items-center justify-between px-6 py-3">
-          <div className="flex items-center gap-2 font-semibold">
-            <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-600 text-sm font-bold text-white">KL</span>
-            {appName} — Admin
+      <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
+          <div className="flex items-center gap-2.5 font-bold text-slate-800">
+            <span className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-teal-600 to-emerald-600 text-sm font-bold text-white shadow-sm">KL</span>
+            <span>{appName} <span className="font-medium text-teal-600">Admin</span></span>
           </div>
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <span>{settings.base()}</span>
-            <button className="btn-ghost" onClick={loadAll}>Refresh</button>
+          <div className="flex items-center gap-2">
+            <span className="hidden text-xs text-slate-400 sm:inline">{settings.base().replace(/^https?:\/\//, '')}</span>
+            <button className="btn-ghost" onClick={loadAll}>↻ Refresh</button>
             <button className="btn-ghost" onClick={() => setConnected(false)}>Disconnect</button>
           </div>
         </div>
-        <nav className="flex gap-1 px-6">
+        <nav className="mx-auto flex max-w-6xl flex-wrap gap-1.5 px-6 pb-2.5">
           {tabs.map(([k, label]) => (
-            <button key={k} onClick={() => setTab(k)} className={`rounded-t-lg px-4 py-2 text-sm font-medium ${tab === k ? 'border-b-2 border-brand-600 text-brand-700' : 'text-slate-500 hover:text-slate-700'}`}>{label}</button>
+            <button key={k} onClick={() => setTab(k)} className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${tab === k ? 'bg-teal-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{label}</button>
           ))}
         </nav>
       </header>
 
       <main className="mx-auto max-w-6xl space-y-4 p-6">
-        {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+        {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 ring-1 ring-red-100">{error}</div>}
 
         {tab === 'overview' && (
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
-            <Stat label="Questions" value={bank.count} />
-            <Stat label="Students" value={studentStats.total} />
-            <Stat label="Active" value={studentStats.active} />
-            <Stat label="Inactive" value={studentStats.inactive} />
-            <Stat label="Submitted" value={submitted} />
-            <Stat label="Terminated" value={terminated} />
-          </div>
+          <>
+            <div className="rounded-2xl bg-gradient-to-r from-teal-600 to-emerald-600 px-6 py-5 text-white shadow-sm">
+              <h1 className="text-xl font-bold">Dashboard</h1>
+              <p className="text-sm text-teal-50/90">Live overview of your exam — questions, students, and results.</p>
+            </div>
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
+              <Stat label="Questions" value={bank.count} />
+              <Stat label="Students" value={studentStats.total} />
+              <Stat label="Active" value={studentStats.active} />
+              <Stat label="Inactive" value={studentStats.inactive} />
+              <Stat label="Submitted" value={submitted} />
+              <Stat label="Terminated" value={terminated} />
+            </div>
+          </>
         )}
 
         {tab === 'users' && <UsersTab attempts={attempts} onChanged={loadAll} setError={setError} />}
@@ -131,7 +137,12 @@ export default function App() {
 }
 
 function Stat({ label, value }: { label: string; value: number }) {
-  return <div className="card"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p><p className="mt-1 text-3xl font-bold">{value}</p></div>;
+  return (
+    <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-100">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</p>
+      <p className="mt-1 text-3xl font-extrabold text-slate-800">{value.toLocaleString()}</p>
+    </div>
+  );
 }
 
 function StatusBadge({ status, reason }: { status: string; reason?: string }) {
@@ -588,6 +599,11 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
 const PASS_MARK = 75;
 function ResultsTab({ attempts, onChanged, setError }: { attempts: Attempt[]; onChanged: () => void; setError: (s: string) => void }) {
   const [review, setReview] = useState<{ name: string; items: ReviewItem[] } | null>(null);
+  const [analysis, setAnalysis] = useState<Analysis | null>(null);
+  async function openAnalysis(a: Attempt) {
+    try { setAnalysis(await api.get<Analysis>(`/api/admin/attempts/${a.attemptId}/analysis`)); }
+    catch (e: any) { setError(e.message); }
+  }
   const [q, setQ] = useState('');
   const rows = attempts.filter((a) => !q.trim() || [a.registrationNumber, a.name, a.branch].some((v) => String(v || '').toLowerCase().includes(q.trim().toLowerCase())));
   const passed = (a: Attempt) => a.percentage != null && a.percentage >= PASS_MARK;
@@ -653,6 +669,7 @@ function ResultsTab({ attempts, onChanged, setError }: { attempts: Attempt[]; on
                   <td className="td font-mono text-[11px] text-slate-500">{a.ip || '—'}</td>
                   <td className="td text-xs text-slate-500">{a.submittedAt ? new Date(a.submittedAt).toLocaleString() : '—'}</td>
                   <td className="td whitespace-nowrap">
+                    {a.status === 'submitted' && <button className="mr-2 text-xs font-medium text-indigo-700 hover:underline" onClick={() => openAnalysis(a)}>Analysis</button>}
                     {a.status === 'submitted' && <button className="mr-2 text-xs font-medium text-brand-700 hover:underline" onClick={() => openReview(a)}>Review</button>}
                     {a.status !== 'in_progress' && <button className="text-xs font-medium text-teal-700 hover:underline" onClick={() => reopen(a)}>Reopen</button>}
                   </td>
@@ -677,6 +694,67 @@ function ResultsTab({ attempts, onChanged, setError }: { attempts: Attempt[]; on
           </div>
         </div>
       )}
+
+      {analysis && <AnalysisModal a={analysis} onClose={() => setAnalysis(null)} />}
+    </div>
+  );
+}
+
+function Bar({ pct, color }: { pct: number; color: string }) {
+  return <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100"><div className={`h-full ${color}`} style={{ width: `${pct}%` }} /></div>;
+}
+
+function AnalysisModal({ a, onClose }: { a: Analysis; onClose: () => void }) {
+  const diffColor = (d?: string) => (d === 'EASY' ? 'bg-green-500' : d === 'HARD' ? 'bg-red-500' : 'bg-amber-500');
+  const pctColor = (p: number) => (p >= 70 ? 'bg-green-500' : p >= 50 ? 'bg-amber-500' : 'bg-red-500');
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" onClick={onClose}>
+      <div className="card max-h-[85vh] w-full max-w-2xl space-y-4 overflow-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-bold text-slate-800">{a.name} <span className="font-mono text-xs text-slate-400">{a.registrationNumber}</span></h3>
+            <p className="text-sm text-slate-500">{a.domain} · Score <b className="text-slate-700">{a.score}/{a.total} ({a.percentage}%)</b></p>
+          </div>
+          <button className="btn-ghost" onClick={onClose}>Close</button>
+        </div>
+
+        <div>
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">By difficulty (how many solved)</p>
+          <div className="space-y-2">
+            {a.byDifficulty.map((d) => (
+              <div key={d.difficulty} className="flex items-center gap-3 text-sm">
+                <span className="w-20 font-medium">{d.difficulty}</span>
+                <Bar pct={d.pct} color={diffColor(d.difficulty)} />
+                <span className="w-24 text-right text-slate-600">{d.correct}/{d.total} · {d.pct}%</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">By concept / topic</p>
+          <div className="max-h-56 space-y-1.5 overflow-auto">
+            {a.byTopic.map((t) => (
+              <div key={t.topic} className="flex items-center gap-3 text-sm">
+                <span className="w-40 truncate" title={t.topic}>{t.topic}</span>
+                <Bar pct={t.pct} color={pctColor(t.pct)} />
+                <span className="w-20 text-right text-slate-600">{t.correct}/{t.total}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-xl bg-green-50 p-3">
+            <p className="mb-1 text-xs font-bold uppercase tracking-wide text-green-700">💪 Strengths</p>
+            {a.strengths.length ? <div className="flex flex-wrap gap-1">{a.strengths.map((s) => <span key={s.topic} className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">{s.topic} ({s.pct}%)</span>)}</div> : <p className="text-xs text-slate-400">—</p>}
+          </div>
+          <div className="rounded-xl bg-red-50 p-3">
+            <p className="mb-1 text-xs font-bold uppercase tracking-wide text-red-700">📉 Needs work</p>
+            {a.weaknesses.length ? <div className="flex flex-wrap gap-1">{a.weaknesses.map((s) => <span key={s.topic} className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">{s.topic} ({s.pct}%)</span>)}</div> : <p className="text-xs text-slate-400">—</p>}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

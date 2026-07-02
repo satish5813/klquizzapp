@@ -371,6 +371,33 @@ app.post('/api/admin/attempts/clear-all', requireAdmin, async (_req, res) => {
   res.json({ ok: true, cleared: n });
 });
 
+/** Per-student strength/weakness analysis: by difficulty and by topic (concept). */
+app.get('/api/admin/attempts/:id/analysis', requireAdmin, async (req, res) => {
+  const a = await db.attempts.get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'Attempt not found' });
+  const student = await db.students.get(a.studentId);
+  const { byId } = await getBank();
+  const diff = { EASY: { c: 0, t: 0 }, MEDIUM: { c: 0, t: 0 }, HARD: { c: 0, t: 0 } };
+  const topicMap = new Map();
+  for (const qid of a.questionIds) {
+    const q = byId.get(qid); if (!q) continue;
+    const d = (q.difficulty || 'MEDIUM').toUpperCase(); if (!diff[d]) diff[d] = { c: 0, t: 0 };
+    const correct = a.answers[qid] !== undefined && Number(a.answers[qid]) === q.answerIndex;
+    diff[d].t++; if (correct) diff[d].c++;
+    const tp = q.topic || 'General'; const tm = topicMap.get(tp) || { c: 0, t: 0 }; tm.t++; if (correct) tm.c++; topicMap.set(tp, tm);
+  }
+  const pctOf = (v) => (v.t ? Math.round((v.c / v.t) * 100) : 0);
+  const byDifficulty = Object.entries(diff).map(([k, v]) => ({ difficulty: k, correct: v.c, total: v.t, pct: pctOf(v) }));
+  const byTopic = [...topicMap].map(([topic, v]) => ({ topic, correct: v.c, total: v.t, pct: pctOf(v) })).sort((x, y) => y.pct - x.pct || y.total - x.total);
+  const strengths = byTopic.filter((t) => t.total >= 1 && t.pct >= 70).slice(0, 6);
+  const weaknesses = byTopic.filter((t) => t.total >= 1 && t.pct < 50).sort((x, y) => x.pct - y.pct).slice(0, 6);
+  res.json({
+    name: student?.name || '', registrationNumber: student?.registrationNumber || '', domain: student?.domain || '',
+    score: a.score ?? 0, total: a.total, percentage: pct(a.score, a.total),
+    byDifficulty, byTopic, strengths, weaknesses,
+  });
+});
+
 app.get('/api/admin/report/questions', requireAdmin, async (_req, res) => {
   const subs = (await db.attempts.all()).filter((a) => a.status === 'submitted');
   const byId = new Map((await db.questions.all()).map((q) => [q.id, q]));
