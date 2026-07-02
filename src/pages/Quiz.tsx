@@ -18,21 +18,28 @@ export default function Quiz() {
   const [showResume, setShowResume] = useState(false); // full-screen warning overlay
   const [kicked, setKicked] = useState(false); // opened on another screen
   const [confirm, setConfirm] = useState(false); // submit-confirmation dialog
+  const [review, setReview] = useState(false); // review panel
+  const [alerted, setAlerted] = useState(false); // 5-minute alert shown once
   const [violations, setViolations] = useState(0);
   const violationsRef = useRef(0);
   const endedRef = useRef(false); // true once submitted (stops the guard)
   const submitRef = useRef<() => void>(() => {});
   const offsetRef = useRef(0); // serverNow - clientNow, to ignore a wrong device clock
+  const answersRef = useRef<Record<string, number>>({}); // latest answers for autosave
   const sid = sessionStorage.getItem('kl_sid') || '';
   const nowMs = () => Date.now() + offsetRef.current; // server-aligned time
+  const SUBMIT_UNLOCK_SEC = 5 * 60; // submit only in the last 5 minutes
+
+  useEffect(() => { answersRef.current = answers; }, [answers]);
 
   useEffect(() => {
     (async () => {
       try {
-        const res = await api.get<{ questions: QuizQuestion[]; status: string; startedAt: string; durationMin: number; serverNow?: number }>(`/api/quiz/${attemptId}?s=${encodeURIComponent(sid)}`);
+        const res = await api.get<{ questions: QuizQuestion[]; status: string; startedAt: string; durationMin: number; serverNow?: number; answers?: Record<string, number> }>(`/api/quiz/${attemptId}?s=${encodeURIComponent(sid)}`);
         if (res.status !== 'in_progress') { navigate(`/result/${attemptId}`); return; }
         offsetRef.current = (res.serverNow || Date.now()) - Date.now(); // sync to server clock
         setQuestions(res.questions);
+        if (res.answers) { setAnswers(res.answers); answersRef.current = res.answers; } // resume saved state
         const dl = new Date(res.startedAt).getTime() + (res.durationMin || 60) * 60_000;
         setDeadline(dl);
         setRemaining(Math.max(0, Math.round((dl - nowMs()) / 1000)));
@@ -43,17 +50,18 @@ export default function Quiz() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attemptId, navigate, sid]);
 
-  // --- Heartbeat: keeps this screen's session alive; blocks if opened elsewhere ---
+  // --- Auto-save answers + heartbeat: lets a student resume the exact state after a crash ---
   useEffect(() => {
     if (!started) return;
-    const ping = async () => {
+    const save = async () => {
+      if (endedRef.current) return;
       try {
-        const r = await api.post<{ ok: boolean; openElsewhere?: boolean }>(`/api/quiz/${attemptId}/ping`, { sessionId: sid });
+        const r = await api.post<{ ok: boolean; openElsewhere?: boolean }>(`/api/quiz/${attemptId}/save`, { sessionId: sid, answers: answersRef.current });
         if (r.openElsewhere && !endedRef.current) { endedRef.current = true; setKicked(true); }
-      } catch { /* transient network error — ignore */ }
+      } catch { /* transient network error — answers stay locally and save next tick */ }
     };
-    ping();
-    const t = setInterval(ping, 45_000);
+    save();
+    const t = setInterval(save, 30_000);
     return () => clearInterval(t);
   }, [started, attemptId, sid]);
 
@@ -63,6 +71,7 @@ export default function Quiz() {
     const tick = () => {
       const left = Math.max(0, Math.round((deadline - nowMs()) / 1000));
       setRemaining(left);
+      if (left <= SUBMIT_UNLOCK_SEC && left > 0) setAlerted((a) => a || true); // 5-min alert (once)
       if (left <= 0 && !endedRef.current) submitRef.current();
     };
     tick();
@@ -175,6 +184,7 @@ export default function Quiz() {
   }
 
   const q = questions[idx];
+  const canSubmit = remaining > 0 && remaining <= SUBMIT_UNLOCK_SEC; // only in the last 5 minutes
 
   // Exam layout: countdown timer on top; MCQ left, question palette right
   return (
@@ -216,14 +226,56 @@ export default function Quiz() {
         </div>
       )}
 
+      {/* Smooth submitting overlay — no abrupt jump */}
+      {busy && (
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-900/80 p-6 text-center">
+          <div className="rounded-2xl bg-white px-8 py-6 shadow-2xl">
+            <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-teal-600 border-t-transparent" />
+            <p className="font-semibold text-slate-800">Submitting your exam…</p>
+            <p className="mt-1 text-xs text-slate-500">Please wait — do not close this window.</p>
+          </div>
+        </div>
+      )}
+
+      {/* REVIEW panel */}
+      {review && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-900/50 p-4" onClick={() => setReview(false)}>
+          <div className="max-h-[80vh] w-full max-w-lg overflow-auto rounded-2xl bg-white p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="font-bold text-slate-800">Review — {answeredCount}/{questions.length} answered</h3>
+              <button className="btn-ghost" onClick={() => setReview(false)}>Close</button>
+            </div>
+            <div className="grid grid-cols-1 gap-1.5">
+              {questions.map((qq, i) => {
+                const a = answers[qq.id];
+                return (
+                  <button key={qq.id} onClick={() => { setIdx(i); setReview(false); }}
+                    className={`flex items-center justify-between rounded-lg px-3 py-2 text-left text-sm ${a === undefined ? 'bg-amber-50 hover:bg-amber-100' : 'bg-slate-50 hover:bg-slate-100'}`}>
+                    <span className="truncate pr-2"><b>Q{i + 1}.</b> {qq.question.replace(/```[\s\S]*?```/g, ' [code] ').slice(0, 60)}</span>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${a === undefined ? 'bg-amber-200 text-amber-800' : 'bg-emerald-100 text-emerald-700'}`}>{a === undefined ? 'not answered' : String.fromCharCode(65 + a)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* TOP: countdown timer bar */}
       <div className={`sticky top-0 z-20 flex items-center justify-between rounded-xl px-4 py-2 text-white shadow ${remaining <= 60 ? 'bg-red-600' : 'bg-teal-600'}`}>
-        <span className="text-sm font-semibold">Question {idx + 1} / {questions.length} · {Object.keys(answers).length} answered</span>
+        <span className="text-sm font-semibold">Question {idx + 1} / {questions.length} · {answeredCount} answered</span>
         <span className="flex items-center gap-2">
           <span className="text-[11px] uppercase tracking-wide opacity-80">Time left</span>
           <span className="font-mono text-2xl font-extrabold tabular-nums">{fmt(remaining)}</span>
         </span>
       </div>
+
+      {/* 5-minute alert banner */}
+      {alerted && remaining > 0 && (
+        <div className="flex items-center gap-2 rounded-xl bg-amber-100 px-4 py-2 text-sm font-semibold text-amber-800 ring-1 ring-amber-200">
+          ⏰ 5 minutes left — the <b>Submit</b> button is now unlocked. Review your answers and submit when ready.
+        </div>
+      )}
 
       <div className="grid gap-4 md:grid-cols-[1fr_260px]">
       {/* LEFT: question + options */}
@@ -253,10 +305,14 @@ export default function Quiz() {
         {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
         <div className="flex items-center justify-between">
           <button className="btn-ghost" disabled={idx === 0} onClick={() => setIdx((i) => i - 1)}>← Previous</button>
-          {idx < questions.length - 1
-            ? <button className="btn-primary" onClick={() => setIdx((i) => i + 1)}>Next →</button>
-            : <button className="btn-primary" disabled={busy} onClick={() => setConfirm(true)}>{busy ? 'Submitting…' : 'Submit exam'}</button>}
+          <div className="flex gap-2">
+            <button className="btn-ghost" onClick={() => setReview(true)}>Review</button>
+            {idx < questions.length - 1
+              ? <button className="btn-primary" onClick={() => setIdx((i) => i + 1)}>Next →</button>
+              : <button className="btn-primary" disabled={busy || !canSubmit} title={canSubmit ? '' : 'Submit unlocks in the last 5 minutes'} onClick={() => setConfirm(true)}>{canSubmit ? 'Submit exam' : 'Submit 🔒'}</button>}
+          </div>
         </div>
+        {!canSubmit && <p className="text-center text-xs text-slate-400">The Submit button unlocks in the last 5 minutes. Keep answering until then.</p>}
       </div>
 
       {/* RIGHT: question number palette */}
@@ -281,7 +337,7 @@ export default function Quiz() {
           <div className="flex items-center gap-2"><span className="h-3 w-3 rounded bg-green-100" /> Answered</div>
           <div className="flex items-center gap-2"><span className="h-3 w-3 rounded bg-slate-100" /> Not answered</div>
         </div>
-        <button className="btn-primary mt-4 w-full" disabled={busy} onClick={() => setConfirm(true)}>{busy ? 'Submitting…' : 'Submit exam'}</button>
+        <button className="btn-primary mt-4 w-full" disabled={busy || !canSubmit} title={canSubmit ? '' : 'Submit unlocks in the last 5 minutes'} onClick={() => setConfirm(true)}>{canSubmit ? 'Submit exam' : 'Submit 🔒 (last 5 min)'}</button>
         <p className="mt-2 text-center text-[11px] text-red-500">Do not exit full screen or switch tabs.</p>
       </div>
       </div>

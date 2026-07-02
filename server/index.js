@@ -432,7 +432,18 @@ app.get('/api/quiz/:attemptId', async (req, res) => {
   const { byId } = await getBank();
   const questions = attempt.questionIds.map((id) => byId.get(id)).filter(Boolean)
     .map((q) => ({ id: q.id, question: q.question, options: q.options, topic: q.topic, difficulty: q.difficulty }));
-  res.json({ attemptId: attempt.id, total: attempt.total, status: attempt.status, startedAt: attempt.startedAt, durationMin: QUIZ_DURATION_MIN, serverNow: Date.now(), questions });
+  res.json({ attemptId: attempt.id, total: attempt.total, status: attempt.status, startedAt: attempt.startedAt, durationMin: QUIZ_DURATION_MIN, serverNow: Date.now(), answers: attempt.answers || {}, questions });
+});
+
+/** Auto-save answers (also acts as the heartbeat). Lets a student resume the exact state. */
+app.post('/api/quiz/:attemptId/save', async (req, res) => {
+  const attempt = await db.attempts.get(req.params.attemptId);
+  if (!attempt || attempt.status !== 'in_progress') return res.json({ ok: false, done: true });
+  const sid = String(req.body?.sessionId || '');
+  if (attempt.sessionId && sid !== attempt.sessionId) return res.json({ ok: false, openElsewhere: true });
+  const answers = (req.body && typeof req.body.answers === 'object' && req.body.answers) || attempt.answers || {};
+  await db.attempts.update(attempt.id, { answers, lastSeen: new Date().toISOString() });
+  res.json({ ok: true });
 });
 
 /** Heartbeat — keeps this screen's session alive; 409 if another screen took over. */
