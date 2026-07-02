@@ -51,7 +51,11 @@ const MCQ_SCHEMA = {
   additionalProperties: false,
 };
 
-function buildPrompt(syllabus, n, avoidTopics) {
+function buildPrompt(syllabus, n, avoidTopics, mix) {
+  const m = mix && (mix.easy || mix.medium || mix.hard) ? mix : null;
+  const mixLine = m
+    ? `- Difficulty distribution for these ${n}: about ${m.easy || 0}% EASY, ${m.medium || 0}% MEDIUM, ${m.hard || 0}% HARD. Set each question's "difficulty" accordingly.`
+    : `- Spread across the syllabus topics with a balanced mix of EASY / MEDIUM / HARD.`;
   return [
     `You are a senior university examiner writing a PROFESSIONAL, exam-quality test.`,
     `Generate exactly ${n} multiple-choice questions (MCQs) STRICTLY within this syllabus/source — do not go beyond it:`,
@@ -65,7 +69,7 @@ function buildPrompt(syllabus, n, avoidTopics) {
     `- The 3 distractors must be plausible and related (common misconceptions), not obviously wrong or joke options.`,
     `- Keep options similar in length and style; avoid "All/None of the above" and avoid grammatical give-aways.`,
     `- Use clear, precise, professional language. Self-contained questions (no "refer to above").`,
-    `- Spread across the syllabus topics with a balanced mix of EASY / MEDIUM / HARD.`,
+    mixLine,
     `- Every question must be distinct — do not paraphrase or repeat the same idea.`,
     `- "explanation" = one concise sentence justifying the correct answer.`,
     `- Set "topic" to the specific concept each question covers.`,
@@ -106,8 +110,8 @@ async function callMessages({ apiKey, model, prompt }) {
   return { questions: parsed.questions || [], usage: data.usage || {} };
 }
 
-const callClaude = ({ apiKey, model, syllabus, n, avoidTopics }) =>
-  callMessages({ apiKey, model, prompt: buildPrompt(syllabus, n, avoidTopics) });
+const callClaude = ({ apiKey, model, syllabus, n, avoidTopics, mix }) =>
+  callMessages({ apiKey, model, prompt: buildPrompt(syllabus, n, avoidTopics, mix) });
 
 function buildExtractPrompt(chunk) {
   return [
@@ -153,7 +157,7 @@ export async function extractMcqs({ apiKey, model, text, onProgress }) {
  * Generate `target` unique MCQs, calling Claude in batches and deduping by
  * normalized question text. `onProgress` is called after each batch.
  */
-export async function generateBank({ apiKey, model, syllabus, target, existingNorms, onProgress }) {
+export async function generateBank({ apiKey, model, syllabus, target, existingNorms, onProgress, mix }) {
   const seen = new Set(existingNorms || []);
   const collected = [];
   const topics = new Set();
@@ -170,6 +174,7 @@ export async function generateBank({ apiKey, model, syllabus, target, existingNo
       syllabus,
       n: need + 4, // ask for a few extra to offset duplicates
       avoidTopics: [...topics],
+      mix,
     });
     requests++;
     inputTokens += usage.input_tokens || 0;

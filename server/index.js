@@ -97,6 +97,7 @@ app.post('/api/admin/generate', requireAdmin, async (req, res) => {
   const count = Math.max(1, Math.min(50000, Number(req.body?.count) || 1000));
   const replace = !!req.body?.replace;
   const domain = String(req.body?.domain || '').trim();
+  const mix = req.body?.mix && typeof req.body.mix === 'object' ? req.body.mix : null;
   if (syllabus.length < 10) return res.status(400).json({ error: 'Provide a syllabus (min 10 chars)' });
 
   const jobId = crypto.randomUUID();
@@ -104,7 +105,7 @@ app.post('/api/admin/generate', requireAdmin, async (req, res) => {
   (async () => {
     try {
       const { questions, stats } = await generateBank({
-        apiKey, model: MODEL, syllabus, target: count,
+        apiKey, model: MODEL, syllabus, target: count, mix,
         existingNorms: await db.questions.normSet(),
         onProgress: (p) => jobs.set(jobId, { ...jobs.get(jobId), ...p, status: 'running' }),
       });
@@ -285,7 +286,7 @@ app.get('/api/admin/students', requireAdmin, async (req, res) => {
 /** Update a student's profile / active state. */
 app.post('/api/admin/students/:id', requireAdmin, async (req, res) => {
   const patch = {};
-  for (const k of ['name', 'branch', 'section']) if (typeof req.body?.[k] === 'string') patch[k] = req.body[k].trim();
+  for (const k of ['name', 'branch', 'section', 'domain']) if (typeof req.body?.[k] === 'string') patch[k] = req.body[k].trim();
   if (typeof req.body?.active === 'boolean') patch.active = req.body.active;
   const updated = await db.students.update(req.params.id, patch);
   if (!updated) return res.status(404).json({ error: 'Student not found' });

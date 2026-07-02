@@ -315,6 +315,7 @@ interface Job { jobId?: string; status: string; collected: number; target: numbe
 function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics: string[]; byDomain?: Record<string, number> }; onChanged: () => void; setError: (s: string) => void }) {
   const [syllabus, setSyllabus] = useState('');
   const [count, setCount] = useState('1000');
+  const [mix, setMix] = useState({ easy: '30', medium: '40', hard: '30' });
   const [replace, setReplace] = useState(false);
   const [domain, setDomain] = useState(localStorage.getItem('kl_gen_domain') || 'Java Core');
   const [studentDomains, setStudentDomains] = useState<string[]>([]);
@@ -416,7 +417,7 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
     if (!settings.claudeKey()) { setError('Enter and save your Claude API key first (below).'); return; }
     setBusy(true); setJob(null); setError('');
     try {
-      const { jobId } = await api.post<{ jobId: string }>('/api/admin/generate', { syllabus, count: Number(count), replace, domain: domain.trim(), apiKey: settings.claudeKey() });
+      const { jobId } = await api.post<{ jobId: string }>('/api/admin/generate', { syllabus, count: Number(count), replace, domain: domain.trim(), mix: { easy: Number(mix.easy) || 0, medium: Number(mix.medium) || 0, hard: Number(mix.hard) || 0 }, apiKey: settings.claudeKey() });
       const poll = async () => {
         const j = await api.get<Job>(`/api/admin/jobs/${jobId}`);
         setJob({ ...j, jobId });
@@ -496,9 +497,12 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
         </div>
         <textarea className="input min-h-[110px]" value={syllabus} onChange={(e) => setSyllabus(e.target.value)} placeholder="Paste the syllabus / topics… (or upload a PDF above)" />
         <div className="flex flex-wrap items-end gap-3">
-          <div className="w-28"><label className="label">How many</label><input className="input" type="number" min={1} value={count} onChange={(e) => setCount(e.target.value)} /></div>
-          <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} /> Replace bank</label>
-          <button className="btn-ghost" onClick={estimate}>Estimate cost</button>
+          <div className="w-24"><label className="label">How many</label><input className="input" type="number" min={1} value={count} onChange={(e) => setCount(e.target.value)} /></div>
+          <div className="w-20"><label className="label text-green-600">Easy %</label><input className="input" type="number" min={0} max={100} value={mix.easy} onChange={(e) => setMix({ ...mix, easy: e.target.value })} /></div>
+          <div className="w-20"><label className="label text-amber-600">Medium %</label><input className="input" type="number" min={0} max={100} value={mix.medium} onChange={(e) => setMix({ ...mix, medium: e.target.value })} /></div>
+          <div className="w-20"><label className="label text-red-600">Hard %</label><input className="input" type="number" min={0} max={100} value={mix.hard} onChange={(e) => setMix({ ...mix, hard: e.target.value })} /></div>
+          <label className="flex items-center gap-2 pb-2 text-sm text-slate-600"><input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} /> Replace</label>
+          <button className="btn-ghost" onClick={estimate}>Estimate</button>
           <button className="btn-primary" disabled={busy || syllabus.trim().length < 10} onClick={generate}>{busy ? 'Working…' : 'Generate'}</button>
         </div>
         {est && <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">~{est.requests} API calls · est. <b>${est.usd}</b> (≈ ₹{est.inr}). <span className="text-slate-400">{est.note}</span></div>}
@@ -577,9 +581,13 @@ function BankTab({ bank, onChanged, setError }: { bank: { count: number; topics:
   );
 }
 
-// ---------------- Results (table + review + CSV + reopen) ----------------
+// ---------------- Results (search + Pass/Fail + review + CSV + reopen) ----------------
+const PASS_MARK = 75;
 function ResultsTab({ attempts, onChanged, setError }: { attempts: Attempt[]; onChanged: () => void; setError: (s: string) => void }) {
   const [review, setReview] = useState<{ name: string; items: ReviewItem[] } | null>(null);
+  const [q, setQ] = useState('');
+  const rows = attempts.filter((a) => !q.trim() || [a.registrationNumber, a.name, a.branch].some((v) => String(v || '').toLowerCase().includes(q.trim().toLowerCase())));
+  const passed = (a: Attempt) => a.percentage != null && a.percentage >= PASS_MARK;
   async function exportCsv() {
     const res = await api.raw('/api/admin/export.csv');
     const blob = await res.blob(); const url = URL.createObjectURL(blob);
@@ -590,7 +598,7 @@ function ResultsTab({ attempts, onChanged, setError }: { attempts: Attempt[]; on
     catch (e: any) { setError(e.message); }
   }
   async function reopen(a: Attempt) {
-    if (!window.confirm(`Delete ${a.name}'s exam result? They will be able to take the exam again.`)) return;
+    if (!window.confirm(`Reopen the exam for ${a.name} (${a.registrationNumber})?\n\nTheir current result (${a.status}${a.percentage != null ? `, ${a.percentage}%` : ''}) will be cleared and they can take the exam again.`)) return;
     try { await api.post(`/api/admin/attempts/${a.attemptId}/reopen`); onChanged(); } catch (e: any) { setError(e.message); }
   }
   async function clearAll() {
@@ -598,30 +606,37 @@ function ResultsTab({ attempts, onChanged, setError }: { attempts: Attempt[]; on
     if (!window.confirm('Are you absolutely sure? This wipes every attempt.')) return;
     try { const r = await api.post<{ cleared: number }>('/api/admin/attempts/clear-all'); onChanged(); window.alert(`Deleted ${r.cleared} attempt(s).`); } catch (e: any) { setError(e.message); }
   }
+  const pass = rows.filter(passed).length, fail = rows.filter((a) => !passed(a)).length;
   return (
     <div className="space-y-3">
-      <div className="flex justify-end gap-2">
-        <button className="btn-danger" disabled={!attempts.length} onClick={clearAll}>🗑 Delete all results</button>
-        <button className="btn-ghost" disabled={!attempts.length} onClick={exportCsv}>⬇ Export CSV</button>
+      <div className="card flex flex-wrap items-center gap-2">
+        <input className="input max-w-xs" placeholder="Search roll no / name / branch…" value={q} onChange={(e) => setQ(e.target.value)} />
+        {q && <button className="btn-ghost" onClick={() => setQ('')}>Clear</button>}
+        <span className="text-sm text-slate-500">{rows.length} result(s) · <span className="font-semibold text-green-600">{pass} pass</span> · <span className="font-semibold text-red-600">{fail} fail</span></span>
+        <div className="ml-auto flex gap-2">
+          <button className="btn-danger" disabled={!attempts.length} onClick={clearAll}>🗑 Delete all</button>
+          <button className="btn-ghost" disabled={!attempts.length} onClick={exportCsv}>⬇ Export CSV</button>
+        </div>
       </div>
-      {!attempts.length ? <div className="card text-sm text-slate-400">No attempts yet.</div> : (
+      {!rows.length ? <div className="card text-sm text-slate-400">{attempts.length ? 'No results match your search.' : 'No attempts yet.'}</div> : (
         <div className="card overflow-x-auto p-0">
           <table className="w-full text-sm">
-            <thead className="border-b border-slate-100 bg-slate-50"><tr>{['Reg. No', 'Name', 'Branch', 'Score', '%', 'Status', 'Warnings', 'Submitted', ''].map((h) => <th key={h} className="th">{h}</th>)}</tr></thead>
+            <thead className="border-b border-slate-100 bg-slate-50"><tr>{['Reg. No', 'Name', 'Branch', 'Score', '%', 'Result', 'Status', 'Warnings', 'Submitted', 'Action'].map((h) => <th key={h} className="th">{h}</th>)}</tr></thead>
             <tbody>
-              {attempts.map((a) => (
+              {rows.map((a) => (
                 <tr key={a.attemptId} className={`border-b border-slate-50 ${a.status === 'terminated' ? 'bg-red-50/50' : ''}`}>
                   <td className="td font-mono text-xs">{a.registrationNumber}</td>
                   <td className="td font-medium">{a.name}</td>
                   <td className="td">{a.branch}</td>
                   <td className="td">{a.score == null ? '—' : `${a.score}/${a.total}`}</td>
                   <td className="td">{a.percentage == null ? '—' : `${a.percentage}%`}</td>
+                  <td className="td">{a.percentage == null ? '—' : <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${passed(a) ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{passed(a) ? 'PASS' : 'FAIL'}</span>}</td>
                   <td className="td"><StatusBadge status={a.status} reason={a.reason} /></td>
                   <td className="td">{a.violations ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">{a.violations}</span> : <span className="text-slate-300">0</span>}</td>
                   <td className="td text-xs text-slate-500">{a.submittedAt ? new Date(a.submittedAt).toLocaleString() : '—'}</td>
                   <td className="td whitespace-nowrap">
                     {a.status === 'submitted' && <button className="mr-2 text-xs font-medium text-brand-700 hover:underline" onClick={() => openReview(a)}>Review</button>}
-                    {a.status !== 'in_progress' && <button className="text-xs font-medium text-red-600 hover:underline" onClick={() => reopen(a)}>Delete</button>}
+                    {a.status !== 'in_progress' && <button className="text-xs font-medium text-teal-700 hover:underline" onClick={() => reopen(a)}>Reopen</button>}
                   </td>
                 </tr>
               ))}
