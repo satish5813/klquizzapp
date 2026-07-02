@@ -108,8 +108,9 @@ export default function Welcome() {
           <Bullet n="1">This test has <b className="text-slate-800">{data.quizSize} multiple-choice questions</b>, each with 4 options. Select one answer per question.</Bullet>
           <Bullet n="2">You have <b className="text-slate-800">{data.durationMin} minutes</b>. A countdown timer is shown at the top; the exam <b className="text-slate-800">submits automatically</b> when time ends.</Bullet>
           <Bullet n="3">Use the <b className="text-slate-800">question panel</b> to move between questions. Answered questions are marked <span className="font-semibold text-emerald-600">green</span>.</Bullet>
-          <Bullet n="4" danger>The exam runs in <b>full screen</b>. Leaving full screen, switching tabs, or copying is <b>not allowed</b> and will <b>end your exam with 0 marks</b>.</Bullet>
-          <Bullet n="5"><b className="text-slate-800">One attempt only.</b> Review your answers and click <b className="text-slate-800">Submit</b> when finished.</Bullet>
+          <Bullet n="4" danger>The exam runs in <b>full screen</b>. Leaving full screen or switching tabs is recorded as a warning — stay on this screen.</Bullet>
+          <Bullet n="5" danger>Do <b>not</b> use any <b>VPN or proxy</b>, and use only <b>one device / one screen</b>. Opening the same registration number elsewhere will lock this screen.</Bullet>
+          <Bullet n="6"><b className="text-slate-800">One attempt only.</b> Review your answers and click <b className="text-slate-800">Submit</b> when finished.</Bullet>
         </ul>
 
         <label className="mt-5 flex cursor-pointer items-center gap-2.5 rounded-xl bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 ring-1 ring-slate-200">

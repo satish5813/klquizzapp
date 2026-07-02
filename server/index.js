@@ -432,7 +432,7 @@ app.get('/api/quiz/:attemptId', async (req, res) => {
   const { byId } = await getBank();
   const questions = attempt.questionIds.map((id) => byId.get(id)).filter(Boolean)
     .map((q) => ({ id: q.id, question: q.question, options: q.options, topic: q.topic, difficulty: q.difficulty }));
-  res.json({ attemptId: attempt.id, total: attempt.total, status: attempt.status, startedAt: attempt.startedAt, durationMin: QUIZ_DURATION_MIN, questions });
+  res.json({ attemptId: attempt.id, total: attempt.total, status: attempt.status, startedAt: attempt.startedAt, durationMin: QUIZ_DURATION_MIN, serverNow: Date.now(), questions });
 });
 
 /** Heartbeat — keeps this screen's session alive; 409 if another screen took over. */
@@ -448,7 +448,11 @@ app.post('/api/quiz/:attemptId/ping', async (req, res) => {
 app.post('/api/quiz/:attemptId/submit', async (req, res) => {
   const attempt = await db.attempts.get(req.params.attemptId);
   if (!attempt) return res.status(404).json({ error: 'Attempt not found' });
-  if (attempt.status !== 'in_progress') return res.status(409).json({ error: `Attempt already ${attempt.status}` });
+  // Idempotent: if it's already finished (e.g. the server auto-finalized it, or a retry),
+  // return the recorded result instead of erroring — the client just proceeds to the result.
+  if (attempt.status !== 'in_progress') {
+    return res.json({ score: attempt.score ?? 0, total: attempt.total, percentage: pct(attempt.score, attempt.total), status: attempt.status, alreadyDone: true });
+  }
   const answers = req.body?.answers || {};
   const violations = Math.max(0, Number(req.body?.violations) || 0);
   const { byId } = await getBank();
@@ -488,5 +492,24 @@ if (fs.existsSync(path.join(clientDir, 'index.html'))) {
   app.get(/^(?!\/api\/).*/, (_req, res) => res.sendFile(path.join(clientDir, 'index.html')));
   console.log('[client] serving student app from', clientDir);
 }
+
+// Safety net: auto-submit any in-progress attempt whose time is up, so "time over"
+// always records a result even if the student's browser/tab didn't submit (backgrounded
+// tab, lost connection, closed laptop, etc.). Runs every 60s.
+async function finalizeExpired() {
+  const now = Date.now();
+  const durMs = QUIZ_DURATION_MIN * 60_000;
+  const all = await db.attempts.all();
+  const expired = all.filter((a) => a.status === 'in_progress' && a.startedAt && (now - Date.parse(a.startedAt)) > durMs + 5_000);
+  if (!expired.length) return;
+  const { byId } = await getBank();
+  for (const a of expired) {
+    let score = 0;
+    for (const id of a.questionIds) { const q = byId.get(id); if (q && Number(a.answers[id]) === q.answerIndex) score++; }
+    await db.attempts.update(a.id, { score, status: 'submitted', submittedAt: new Date().toISOString() });
+  }
+  console.log(`[finalize] auto-submitted ${expired.length} expired attempt(s)`);
+}
+setInterval(() => finalizeExpired().catch((e) => console.error('[finalize]', e.message)), 60_000);
 
 app.listen(PORT, () => console.log(`[${APP_NAME}] server on http://localhost:${PORT}  (model: ${MODEL}, store: ${db.driver})`));

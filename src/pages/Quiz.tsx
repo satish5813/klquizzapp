@@ -17,25 +17,30 @@ export default function Quiz() {
   const [remaining, setRemaining] = useState(0); // seconds left
   const [showResume, setShowResume] = useState(false); // full-screen warning overlay
   const [kicked, setKicked] = useState(false); // opened on another screen
+  const [confirm, setConfirm] = useState(false); // submit-confirmation dialog
   const [violations, setViolations] = useState(0);
   const violationsRef = useRef(0);
   const endedRef = useRef(false); // true once submitted (stops the guard)
   const submitRef = useRef<() => void>(() => {});
+  const offsetRef = useRef(0); // serverNow - clientNow, to ignore a wrong device clock
   const sid = sessionStorage.getItem('kl_sid') || '';
+  const nowMs = () => Date.now() + offsetRef.current; // server-aligned time
 
   useEffect(() => {
     (async () => {
       try {
-        const res = await api.get<{ questions: QuizQuestion[]; status: string; startedAt: string; durationMin: number }>(`/api/quiz/${attemptId}?s=${encodeURIComponent(sid)}`);
+        const res = await api.get<{ questions: QuizQuestion[]; status: string; startedAt: string; durationMin: number; serverNow?: number }>(`/api/quiz/${attemptId}?s=${encodeURIComponent(sid)}`);
         if (res.status !== 'in_progress') { navigate(`/result/${attemptId}`); return; }
+        offsetRef.current = (res.serverNow || Date.now()) - Date.now(); // sync to server clock
         setQuestions(res.questions);
         const dl = new Date(res.startedAt).getTime() + (res.durationMin || 60) * 60_000;
         setDeadline(dl);
-        setRemaining(Math.max(0, Math.round((dl - Date.now()) / 1000)));
+        setRemaining(Math.max(0, Math.round((dl - nowMs()) / 1000)));
       } catch (e: any) {
         if (/another screen/i.test(e.message)) setKicked(true); else setError(e.message);
       } finally { setLoading(false); }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attemptId, navigate, sid]);
 
   // --- Heartbeat: keeps this screen's session alive; blocks if opened elsewhere ---
@@ -48,21 +53,22 @@ export default function Quiz() {
       } catch { /* transient network error — ignore */ }
     };
     ping();
-    const t = setInterval(ping, 30_000);
+    const t = setInterval(ping, 45_000);
     return () => clearInterval(t);
   }, [started, attemptId, sid]);
 
-  // --- Countdown: auto-submit when time runs out ---
+  // --- Countdown: auto-submit when time runs out (server-aligned clock) ---
   useEffect(() => {
     if (!started || !deadline) return;
     const tick = () => {
-      const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+      const left = Math.max(0, Math.round((deadline - nowMs()) / 1000));
       setRemaining(left);
       if (left <= 0 && !endedRef.current) submitRef.current();
     };
     tick();
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [started, deadline]);
 
   // --- Exam guard: leaving full screen / switching tab does NOT end the exam.
@@ -111,15 +117,28 @@ export default function Quiz() {
   }
 
   async function submit() {
-    setBusy(true); setError('');
+    setBusy(true); setError(''); setConfirm(false);
     endedRef.current = true;
-    try {
-      await api.post(`/api/quiz/${attemptId}/submit`, { answers, violations: violationsRef.current });
-      if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
-      navigate(`/result/${attemptId}`);
-    } catch (e: any) { setError(e.message); setBusy(false); endedRef.current = false; }
+    // retry a few times — the end-of-exam burst can cause a transient failure
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        await api.post(`/api/quiz/${attemptId}/submit`, { answers, violations: violationsRef.current });
+        if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
+        navigate(`/result/${attemptId}`);
+        return;
+      } catch (e: any) {
+        if (attempt === 4) { setError('Could not submit (network). Retrying…'); }
+        await new Promise((r) => setTimeout(r, 1500 * attempt));
+      }
+    }
+    // keep trying quietly in the background so no one is stuck
+    endedRef.current = true;
+    const keep = setInterval(async () => {
+      try { await api.post(`/api/quiz/${attemptId}/submit`, { answers, violations: violationsRef.current }); clearInterval(keep); navigate(`/result/${attemptId}`); } catch { /* keep retrying */ }
+    }, 4000);
   }
   submitRef.current = submit;
+  const answeredCount = Object.keys(answers).length;
 
   const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
@@ -156,11 +175,30 @@ export default function Quiz() {
   }
 
   const q = questions[idx];
-  const answeredCount = Object.keys(answers).length;
 
   // Exam layout: countdown timer on top; MCQ left, question palette right
   return (
     <div className="space-y-4">
+      {/* Submit confirmation — lets the student review before finishing */}
+      {confirm && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-900/70 p-6" onClick={() => setConfirm(false)}>
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 text-center shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <p className="text-4xl">📝</p>
+            <h2 className="mt-2 text-xl font-bold text-slate-800">Submit your exam?</h2>
+            <p className="mt-1 text-sm text-slate-600">You answered <b>{answeredCount}</b> of <b>{questions.length}</b> questions.</p>
+            {answeredCount < questions.length && (
+              <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-left text-xs text-amber-700">
+                Not answered: {questions.map((qq, i) => (answers[qq.id] === undefined ? i + 1 : null)).filter((x) => x !== null).join(', ')}
+              </div>
+            )}
+            <div className="mt-4 flex gap-2">
+              <button onClick={() => setConfirm(false)} className="flex-1 rounded-xl bg-white py-2.5 font-semibold text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50">← Review answers</button>
+              <button onClick={submit} disabled={busy} className="flex-1 rounded-xl bg-teal-600 py-2.5 font-semibold text-white hover:bg-teal-700 disabled:opacity-50">{busy ? 'Submitting…' : 'Submit now'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Full-screen warning overlay — blocks the exam until the student resumes (no penalty) */}
       {showResume && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-slate-900/90 p-6 text-center">
@@ -217,7 +255,7 @@ export default function Quiz() {
           <button className="btn-ghost" disabled={idx === 0} onClick={() => setIdx((i) => i - 1)}>← Previous</button>
           {idx < questions.length - 1
             ? <button className="btn-primary" onClick={() => setIdx((i) => i + 1)}>Next →</button>
-            : <button className="btn-primary" disabled={busy} onClick={submit}>{busy ? 'Submitting…' : 'Submit exam'}</button>}
+            : <button className="btn-primary" disabled={busy} onClick={() => setConfirm(true)}>{busy ? 'Submitting…' : 'Submit exam'}</button>}
         </div>
       </div>
 
@@ -243,7 +281,7 @@ export default function Quiz() {
           <div className="flex items-center gap-2"><span className="h-3 w-3 rounded bg-green-100" /> Answered</div>
           <div className="flex items-center gap-2"><span className="h-3 w-3 rounded bg-slate-100" /> Not answered</div>
         </div>
-        <button className="btn-primary mt-4 w-full" disabled={busy} onClick={submit}>{busy ? 'Submitting…' : 'Submit exam'}</button>
+        <button className="btn-primary mt-4 w-full" disabled={busy} onClick={() => setConfirm(true)}>{busy ? 'Submitting…' : 'Submit exam'}</button>
         <p className="mt-2 text-center text-[11px] text-red-500">Do not exit full screen or switch tabs.</p>
       </div>
       </div>
