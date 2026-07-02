@@ -10,8 +10,9 @@ NIXPACKS_NODE_VERSION = "22"
 cmds = ["npm ci"]
 
 [phases.build]
-# builds the student client into ./dist (served by the server)
-cmds = ["npm run build"]
+# builds the student client into ./dist (vite only — skip tsc typecheck to keep the
+# VPS build light/fast; the client is already type-checked before commit)
+cmds = ["npx vite build"]
 
 [start]
 cmd = "node server/index.js"
