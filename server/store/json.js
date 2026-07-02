@@ -29,6 +29,15 @@ export const jsonDb = {
     count: async () => read('questions').length,
     addMany: async (items) => { const cur = read('questions'); cur.push(...items); write('questions', cur); return cur.length; },
     clear: async () => write('questions', []),
+    get: async (id) => read('questions').find((q) => q.id === id) || null,
+    update: async (id, patch) => {
+      const cur = read('questions');
+      const i = cur.findIndex((q) => q.id === id);
+      if (i === -1) return null;
+      for (const k of ['question', 'options', 'answerIndex', 'topic', 'difficulty', 'explanation', 'domain']) if (k in patch) cur[i][k] = patch[k];
+      write('questions', cur);
+      return cur[i];
+    },
     clearDomain: async (domain) => {
       const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
       const cur = read('questions');
@@ -105,5 +114,15 @@ export const jsonDb = {
   settings: {
     get: async (key) => { const all = readObj('settings'); return all[key] ?? null; },
     set: async (key, val) => { const all = readObj('settings'); all[key] = val; write('settings', all); return val; },
+  },
+
+  // student support tickets
+  tickets: {
+    all: async () => read('tickets'),
+    add: async (t) => { const cur = read('tickets'); cur.push(t); write('tickets', cur); return t; },
+    update: async (id, patch) => {
+      const cur = read('tickets'); const i = cur.findIndex((t) => t.id === id);
+      if (i === -1) return null; cur[i] = { ...cur[i], ...patch }; write('tickets', cur); return cur[i];
+    },
   },
 };

@@ -18,6 +18,7 @@ const APP_NAME = 'KL AI QuizApp';
 const db = await initStore();
 
 const app = express();
+app.set('trust proxy', true); // behind Coolify/Traefik → get the real client IP
 app.use(cors());
 app.use(express.json({ limit: '8mb' }));
 
@@ -26,6 +27,7 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 const pct = (score, total) => Math.round(((score ?? 0) / total) * 100);
+const clientIp = (req) => String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || '';
 // Normalize a domain label so "Java Core", "JavaCore", "java core" all match.
 const normDomain = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 // A screen is considered "still active" if it pinged within this window.
@@ -66,6 +68,46 @@ app.post('/api/admin/questions/clear', requireAdmin, async (req, res) => {
   else { removed = await db.questions.count(); await db.questions.clear(); }
   invalidateBank();
   res.json({ removed, bankTotal: await db.questions.count() });
+});
+
+/** List questions WITH answers — searchable + paginated (admin question editor). */
+app.get('/api/admin/questions/list', requireAdmin, async (req, res) => {
+  const search = String(req.query.search || '').trim().toLowerCase();
+  const domain = String(req.query.domain || '').trim();
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const pageSize = Math.min(100, Math.max(5, Number(req.query.pageSize) || 20));
+  let all = (await getBank()).list;
+  if (domain) all = all.filter((q) => normDomain(q.domain) === normDomain(domain));
+  if (search) all = all.filter((q) => (q.question + ' ' + (q.options || []).join(' ') + ' ' + (q.topic || '')).toLowerCase().includes(search));
+  const total = all.length, start = (page - 1) * pageSize;
+  res.json({ rows: all.slice(start, start + pageSize), total, page, pageSize });
+});
+
+/** Edit a question (fix a wrong answer key, text, options, etc.). */
+app.post('/api/admin/questions/:id', requireAdmin, async (req, res) => {
+  const patch = {};
+  if (typeof req.body?.question === 'string') patch.question = req.body.question;
+  if (Array.isArray(req.body?.options) && req.body.options.length === 4) patch.options = req.body.options.map(String);
+  if (Number.isInteger(req.body?.answerIndex) && req.body.answerIndex >= 0 && req.body.answerIndex <= 3) patch.answerIndex = req.body.answerIndex;
+  for (const k of ['topic', 'difficulty', 'explanation']) if (typeof req.body?.[k] === 'string') patch[k] = req.body[k];
+  const updated = await db.questions.update(req.params.id, patch);
+  if (!updated) return res.status(404).json({ error: 'Question not found' });
+  invalidateBank();
+  res.json(updated);
+});
+
+/** Re-grade all submitted attempts against the CURRENT answer keys (after fixing a wrong answer). */
+app.post('/api/admin/regrade', requireAdmin, async (_req, res) => {
+  const { byId } = await getBank();
+  const all = await db.attempts.all();
+  let changed = 0;
+  for (const a of all) {
+    if (a.status !== 'submitted') continue;
+    let score = 0;
+    for (const id of a.questionIds) { const q = byId.get(id); if (q && Number(a.answers[id]) === q.answerIndex) score++; }
+    if (score !== a.score) { await db.attempts.update(a.id, { score }); changed++; }
+  }
+  res.json({ regraded: all.filter((a) => a.status === 'submitted').length, changed });
 });
 
 /** Rename a question domain (e.g. fix "Python Core" → "Python" to match students). */
@@ -150,11 +192,9 @@ async function scheduleStatusFor(domain) {
   const all = (await db.settings.get('schedules')) || {};
   const key = Object.keys(all).find((k) => normDomain(k) === normDomain(domain));
   const s = key ? all[key] : null;
-  if (!s || !s.enabled) return { open: false, reason: 'not_scheduled', domain };
-  const now = Date.now();
-  if (s.startAt && now < Date.parse(s.startAt)) return { open: false, reason: 'not_started', startAt: s.startAt, endAt: s.endAt, domain };
-  if (s.endAt && now > Date.parse(s.endAt)) return { open: false, reason: 'closed', startAt: s.startAt, endAt: s.endAt, domain };
-  return { open: true, reason: 'open', startAt: s.startAt, endAt: s.endAt, domain };
+  const durationMin = (s && Number(s.durationMin)) || QUIZ_DURATION_MIN;
+  if (!s || !s.enabled) return { open: false, reason: 'not_scheduled', domain, durationMin };
+  return { open: true, reason: 'open', domain, durationMin };
 }
 
 app.get('/api/admin/schedules', requireAdmin, async (_req, res) => {
@@ -167,11 +207,9 @@ app.post('/api/admin/schedules', requireAdmin, async (req, res) => {
   const domain = String(req.body?.domain || '').trim();
   if (!domain) return res.status(400).json({ error: 'Domain is required' });
   const enabled = !!req.body?.enabled;
-  const startAt = req.body?.startAt ? new Date(req.body.startAt).toISOString() : null;
-  const endAt = req.body?.endAt ? new Date(req.body.endAt).toISOString() : null;
-  if (enabled && startAt && endAt && Date.parse(endAt) <= Date.parse(startAt)) return res.status(400).json({ error: 'End time must be after start time' });
+  const durationMin = Math.max(1, Math.min(180, Number(req.body?.durationMin) || QUIZ_DURATION_MIN)); // 1..180 min
   const all = (await db.settings.get('schedules')) || {};
-  all[domain] = { enabled, startAt, endAt };
+  all[domain] = { enabled, durationMin };
   await db.settings.set('schedules', all);
   res.json({ domain, ...all[domain] });
 });
@@ -299,9 +337,10 @@ async function attemptRows() {
   return (await db.attempts.all()).map((a) => {
     const s = students.get(a.studentId) || {};
     return {
-      attemptId: a.id, registrationNumber: s.registrationNumber || '', name: s.name || '', branch: s.branch || '', section: s.section || '',
+      attemptId: a.id, registrationNumber: s.registrationNumber || '', name: s.name || '', branch: s.branch || '', section: s.section || '', domain: s.domain || '',
       score: a.score, total: a.total, percentage: a.score == null ? null : pct(a.score, a.total),
-      status: a.status, reason: a.reason || '', violations: a.violations ?? 0, startedAt: a.startedAt, submittedAt: a.submittedAt,
+      status: a.status, reason: a.reason || '', violations: a.violations ?? 0, autoSubmitted: !!a.autoSubmitted,
+      ip: a.ip || '', startedAt: a.startedAt, submittedAt: a.submittedAt,
     };
   }).sort((x, y) => (y.startedAt || '').localeCompare(x.startedAt || ''));
 }
@@ -311,8 +350,8 @@ app.get('/api/admin/attempts', requireAdmin, async (_req, res) => res.json(await
 app.get('/api/admin/export.csv', requireAdmin, async (_req, res) => {
   const rows = await attemptRows();
   const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const header = ['RegistrationNumber', 'Name', 'Branch', 'Section', 'Score', 'Total', 'Percentage', 'Status', 'Violations', 'StartedAt', 'SubmittedAt'];
-  const lines = rows.map((r) => [r.registrationNumber, r.name, r.branch, r.section, r.score ?? '', r.total, r.percentage ?? '', r.status, r.violations ?? 0, r.startedAt, r.submittedAt || ''].map(esc).join(','));
+  const header = ['RegistrationNumber', 'Name', 'Branch', 'Section', 'Domain', 'Score', 'Total', 'Percentage', 'Status', 'AutoSubmitted', 'Violations', 'IP', 'StartedAt', 'SubmittedAt'];
+  const lines = rows.map((r) => [r.registrationNumber, r.name, r.branch, r.section, r.domain, r.score ?? '', r.total, r.percentage ?? '', r.status, r.autoSubmitted ? 'yes' : 'no', r.violations ?? 0, r.ip, r.startedAt, r.submittedAt || ''].map(esc).join(','));
   res.setHeader('content-type', 'text/csv');
   res.setHeader('content-disposition', 'attachment; filename="kl-ai-quiz-results.csv"');
   res.send([header.join(','), ...lines].join('\n'));
@@ -348,6 +387,24 @@ app.get('/api/admin/report/questions', requireAdmin, async (_req, res) => {
     return { id: q.id, question: q.question, topic: q.topic, difficulty: q.difficulty, answered: s.answered, correct: s.correct, pctCorrect: s.answered ? Math.round((s.correct / s.answered) * 100) : null };
   });
   res.json({ submittedAttempts: subs.length, questions });
+});
+
+// ============ Support tickets ============
+/** Any student can raise a ticket (no auth). */
+app.post('/api/ticket', async (req, res) => {
+  const registrationNumber = String(req.body?.registrationNumber || '').trim();
+  const message = String(req.body?.message || '').trim().slice(0, 1000);
+  if (!message) return res.status(400).json({ error: 'Please describe your issue.' });
+  const student = registrationNumber ? await db.students.byRegNo(registrationNumber) : null;
+  const t = await db.tickets.add({ id: crypto.randomUUID(), registrationNumber, name: student?.name || '', message, status: 'open', createdAt: new Date().toISOString() });
+  res.json({ ok: true, id: t.id });
+});
+
+app.get('/api/admin/tickets', requireAdmin, async (_req, res) => res.json(await db.tickets.all()));
+app.post('/api/admin/tickets/:id/resolve', requireAdmin, async (req, res) => {
+  const t = await db.tickets.update(req.params.id, { status: 'resolved' });
+  if (!t) return res.status(404).json({ error: 'Ticket not found' });
+  res.json(t);
 });
 
 // ============ Student: login → instructions → start ============
@@ -393,11 +450,7 @@ app.post('/api/exam/start', async (req, res) => {
   // The student's DOMAIN exam must be scheduled + open.
   const sch = await scheduleStatusFor(student.domain);
   if (!sch.open) return res.status(403).json({
-    error: sch.reason === 'not_started'
-      ? `Your ${student.domain || ''} exam has not started yet. It opens at ${new Date(sch.startAt).toLocaleString()}.`
-      : sch.reason === 'closed'
-        ? `Your ${student.domain || ''} exam window has closed.`
-        : `No exam is scheduled for your domain${student.domain ? ` (${student.domain})` : ''} yet. Please wait for the coordinator.`,
+    error: `No exam is scheduled for your domain${student.domain ? ` (${student.domain})` : ''} yet. Please wait for the coordinator.`,
     schedule: sch,
   });
   // Domain-specific: a student only gets questions from their Hackathon Domain.
@@ -413,10 +466,11 @@ app.post('/api/exam/start', async (req, res) => {
   const sid = crypto.randomUUID();
   const attempt = await db.attempts.add({
     id: crypto.randomUUID(), studentId: student.id, questionIds: picked.map((q) => q.id),
-    answers: {}, score: null, total: size, status: 'in_progress', reason: '',
+    answers: {}, score: null, total: size, status: 'in_progress', reason: '', durationMin: sch.durationMin,
+    ip: clientIp(req), autoSubmitted: false,
     sessionId: sid, lastSeen: new Date().toISOString(), startedAt: new Date().toISOString(), submittedAt: null,
   });
-  res.json({ attemptId: attempt.id, total: size, sessionId: sid });
+  res.json({ attemptId: attempt.id, total: size, sessionId: sid, durationMin: sch.durationMin });
 });
 
 // ============ Exam: questions / submit / terminate / result ============
@@ -433,7 +487,7 @@ app.get('/api/quiz/:attemptId', async (req, res) => {
   const { byId } = await getBank();
   const questions = attempt.questionIds.map((id) => byId.get(id)).filter(Boolean)
     .map((q) => ({ id: q.id, question: q.question, options: q.options, topic: q.topic, difficulty: q.difficulty }));
-  res.json({ attemptId: attempt.id, total: attempt.total, status: attempt.status, startedAt: attempt.startedAt, durationMin: QUIZ_DURATION_MIN, serverNow: Date.now(), answers: attempt.answers || {}, questions });
+  res.json({ attemptId: attempt.id, total: attempt.total, status: attempt.status, startedAt: attempt.startedAt, durationMin: attempt.durationMin || QUIZ_DURATION_MIN, serverNow: Date.now(), answers: attempt.answers || {}, questions });
 });
 
 /** Auto-save answers (also acts as the heartbeat). Lets a student resume the exact state. */
@@ -510,15 +564,15 @@ if (fs.existsSync(path.join(clientDir, 'index.html'))) {
 // tab, lost connection, closed laptop, etc.). Runs every 60s.
 async function finalizeExpired() {
   const now = Date.now();
-  const durMs = QUIZ_DURATION_MIN * 60_000;
   const all = await db.attempts.all();
-  const expired = all.filter((a) => a.status === 'in_progress' && a.startedAt && (now - Date.parse(a.startedAt)) > durMs + 5_000);
+  const expired = all.filter((a) => a.status === 'in_progress' && a.startedAt &&
+    (now - Date.parse(a.startedAt)) > ((a.durationMin || QUIZ_DURATION_MIN) * 60_000) + 5_000);
   if (!expired.length) return;
   const { byId } = await getBank();
   for (const a of expired) {
     let score = 0;
     for (const id of a.questionIds) { const q = byId.get(id); if (q && Number(a.answers[id]) === q.answerIndex) score++; }
-    await db.attempts.update(a.id, { score, status: 'submitted', submittedAt: new Date().toISOString() });
+    await db.attempts.update(a.id, { score, status: 'submitted', autoSubmitted: true, submittedAt: new Date().toISOString() });
   }
   console.log(`[finalize] auto-submitted ${expired.length} expired attempt(s)`);
 }

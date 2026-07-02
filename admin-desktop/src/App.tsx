@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, settings, Student, StudentsPage, Attempt, QReport, ReviewItem } from './api';
+import * as XLSX from 'xlsx';
+import { api, settings, Student, StudentsPage, Attempt, QReport, ReviewItem, QuestionRow, Ticket } from './api';
 import { extractPdfText } from './pdf';
 
-type Tab = 'overview' | 'users' | 'bank' | 'results' | 'report' | 'schedule';
+type Tab = 'overview' | 'users' | 'bank' | 'questions' | 'schedule' | 'results' | 'report' | 'tickets';
 
 export default function App() {
   const [connected, setConnected] = useState(false);
@@ -80,7 +81,7 @@ export default function App() {
 
   const submitted = attempts.filter((a) => a.status === 'submitted').length;
   const terminated = attempts.filter((a) => a.status === 'terminated').length;
-  const tabs: [Tab, string][] = [['overview', 'Overview'], ['users', 'User management'], ['bank', 'Question bank'], ['schedule', 'Schedule'], ['results', 'Results'], ['report', 'Question report']];
+  const tabs: [Tab, string][] = [['overview', 'Overview'], ['users', 'User management'], ['bank', 'Question bank'], ['questions', 'Questions'], ['schedule', 'Schedule'], ['results', 'Results'], ['report', 'Question report'], ['tickets', 'Tickets']];
 
   return (
     <div className="min-h-screen">
@@ -119,9 +120,11 @@ export default function App() {
 
         {tab === 'users' && <UsersTab attempts={attempts} onChanged={loadAll} setError={setError} />}
         {tab === 'bank' && <BankTab bank={bank} onChanged={loadAll} setError={setError} />}
+        {tab === 'questions' && <QuestionsTab setError={setError} />}
         {tab === 'schedule' && <ScheduleTab setError={setError} />}
         {tab === 'results' && <ResultsTab attempts={attempts} onChanged={loadAll} setError={setError} />}
         {tab === 'report' && <ReportTab setError={setError} />}
+        {tab === 'tickets' && <TicketsTab setError={setError} />}
       </main>
     </div>
   );
@@ -606,6 +609,18 @@ function ResultsTab({ attempts, onChanged, setError }: { attempts: Attempt[]; on
     if (!window.confirm('Are you absolutely sure? This wipes every attempt.')) return;
     try { const r = await api.post<{ cleared: number }>('/api/admin/attempts/clear-all'); onChanged(); window.alert(`Deleted ${r.cleared} attempt(s).`); } catch (e: any) { setError(e.message); }
   }
+  function exportExcel() {
+    const data = rows.map((a) => ({
+      'Reg. No': a.registrationNumber, Name: a.name, Branch: a.branch, Domain: a.domain || '',
+      Score: a.score ?? '', Total: a.total, 'Percentage': a.percentage ?? '',
+      Result: a.percentage == null ? '' : passed(a) ? 'PASS' : 'FAIL', Status: a.status,
+      'Auto-submitted': a.autoSubmitted ? 'yes' : 'no', Warnings: a.violations ?? 0, IP: a.ip || '',
+      'Started': a.startedAt ? new Date(a.startedAt).toLocaleString() : '', 'Submitted': a.submittedAt ? new Date(a.submittedAt).toLocaleString() : '',
+    }));
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Results');
+    XLSX.writeFile(wb, 'kl-ai-quiz-results.xlsx');
+  }
   const pass = rows.filter(passed).length, fail = rows.filter((a) => !passed(a)).length;
   return (
     <div className="space-y-3">
@@ -615,13 +630,14 @@ function ResultsTab({ attempts, onChanged, setError }: { attempts: Attempt[]; on
         <span className="text-sm text-slate-500">{rows.length} result(s) · <span className="font-semibold text-green-600">{pass} pass</span> · <span className="font-semibold text-red-600">{fail} fail</span></span>
         <div className="ml-auto flex gap-2">
           <button className="btn-danger" disabled={!attempts.length} onClick={clearAll}>🗑 Delete all</button>
-          <button className="btn-ghost" disabled={!attempts.length} onClick={exportCsv}>⬇ Export CSV</button>
+          <button className="btn-primary" disabled={!rows.length} onClick={exportExcel}>⬇ Excel</button>
+          <button className="btn-ghost" disabled={!attempts.length} onClick={exportCsv}>⬇ CSV</button>
         </div>
       </div>
       {!rows.length ? <div className="card text-sm text-slate-400">{attempts.length ? 'No results match your search.' : 'No attempts yet.'}</div> : (
         <div className="card overflow-x-auto p-0">
           <table className="w-full text-sm">
-            <thead className="border-b border-slate-100 bg-slate-50"><tr>{['Reg. No', 'Name', 'Branch', 'Score', '%', 'Result', 'Status', 'Warnings', 'Submitted', 'Action'].map((h) => <th key={h} className="th">{h}</th>)}</tr></thead>
+            <thead className="border-b border-slate-100 bg-slate-50"><tr>{['Reg. No', 'Name', 'Branch', 'Score', '%', 'Result', 'Status', 'Auto', 'Warn', 'IP', 'Submitted', 'Action'].map((h) => <th key={h} className="th">{h}</th>)}</tr></thead>
             <tbody>
               {rows.map((a) => (
                 <tr key={a.attemptId} className={`border-b border-slate-50 ${a.status === 'terminated' ? 'bg-red-50/50' : ''}`}>
@@ -632,7 +648,9 @@ function ResultsTab({ attempts, onChanged, setError }: { attempts: Attempt[]; on
                   <td className="td">{a.percentage == null ? '—' : `${a.percentage}%`}</td>
                   <td className="td">{a.percentage == null ? '—' : <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${passed(a) ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{passed(a) ? 'PASS' : 'FAIL'}</span>}</td>
                   <td className="td"><StatusBadge status={a.status} reason={a.reason} /></td>
+                  <td className="td">{a.autoSubmitted ? <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-semibold text-blue-700">auto</span> : <span className="text-slate-300">—</span>}</td>
                   <td className="td">{a.violations ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">{a.violations}</span> : <span className="text-slate-300">0</span>}</td>
+                  <td className="td font-mono text-[11px] text-slate-500">{a.ip || '—'}</td>
                   <td className="td text-xs text-slate-500">{a.submittedAt ? new Date(a.submittedAt).toLocaleString() : '—'}</td>
                   <td className="td whitespace-nowrap">
                     {a.status === 'submitted' && <button className="mr-2 text-xs font-medium text-brand-700 hover:underline" onClick={() => openReview(a)}>Review</button>}
@@ -711,7 +729,8 @@ const isoToLocalInput = (iso: string | null) => {
   const d = new Date(iso);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
-interface Sched { enabled: boolean; startAt: string; endAt: string }
+interface Sched { enabled: boolean; durationMin: number }
+const DURATIONS = [10, 20, 30, 40, 60, 90, 120, 150, 180];
 function ScheduleTab({ setError }: { setError: (s: string) => void }) {
   const [domains, setDomains] = useState<string[]>([]);
   const [sched, setSched] = useState<Record<string, Sched>>({});
@@ -730,7 +749,7 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
       const s: Record<string, Sched> = {};
       for (const d of all) {
         const e = r.schedules[d] || {};
-        s[d] = { enabled: !!e.enabled, startAt: isoToLocalInput(e.startAt || null), endAt: isoToLocalInput(e.endAt || null) };
+        s[d] = { enabled: !!e.enabled, durationMin: Number(e.durationMin) || 60 };
       }
       setDomains(all); setSched(s); setCounts(stats.byDomain || {});
       setSelected((prev) => (prev && all.includes(prev) ? prev : all[0] || ''));
@@ -740,16 +759,15 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
   useEffect(() => { load(); }, []);
 
   const cur = selected ? sched[selected] : undefined;
-  const toIso = (v: string) => (v ? new Date(v).toISOString() : null);
-  const isLive = (d: string) => { const s = sched[d]; return s && s.enabled && (!s.startAt || new Date(s.startAt) <= new Date()) && (!s.endAt || new Date(s.endAt) >= new Date()); };
+  const isLive = (d: string) => !!sched[d]?.enabled;
   const upd = (patch: Partial<Sched>) => setSched((s) => ({ ...s, [selected]: { ...s[selected], ...patch } }));
 
   async function apply(enabled: boolean) {
     if (!selected || !cur) return;
     setBusy(true); setError(''); setMsg('');
     try {
-      await api.post('/api/admin/schedules', { domain: selected, enabled, startAt: enabled ? toIso(cur.startAt) : null, endAt: enabled ? toIso(cur.endAt) : null });
-      setMsg(enabled ? `${selected} exam activated.` : `${selected} exam disabled.`); setTimeout(() => setMsg(''), 3000);
+      await api.post('/api/admin/schedules', { domain: selected, enabled, durationMin: cur.durationMin });
+      setMsg(enabled ? `${selected} exam activated (${cur.durationMin} min).` : `${selected} exam disabled.`); setTimeout(() => setMsg(''), 3000);
       await load();
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
   }
@@ -788,17 +806,14 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
 
         {cur && (
           <>
-            <div className="mt-5 grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Starts at (optional)</label>
-                <input type="datetime-local" className="w-full rounded-xl border border-slate-300 px-3 py-2.5 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" value={cur.startAt} onChange={(e) => upd({ startAt: e.target.value })} />
-              </div>
-              <div>
-                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Ends at (optional)</label>
-                <input type="datetime-local" className="w-full rounded-xl border border-slate-300 px-3 py-2.5 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" value={cur.endAt} onChange={(e) => upd({ endAt: e.target.value })} />
-              </div>
+            <div className="mt-5">
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Exam duration (each student gets this much time)</label>
+              <select className="rounded-xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-base font-semibold text-slate-800 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                value={cur.durationMin} onChange={(e) => upd({ durationMin: Number(e.target.value) })}>
+                {DURATIONS.map((d) => <option key={d} value={d}>{d >= 60 ? `${d / 60} hour${d > 60 ? 's' : ''}${d % 60 ? ` ${d % 60} min` : ''}` : `${d} minutes`}</option>)}
+              </select>
             </div>
-            <p className="mt-2 text-xs text-slate-400">Leave times blank to open immediately. Times use this computer's timezone.</p>
+            <p className="mt-2 text-xs text-slate-400">The exam opens immediately on Activate — no fixed date/time. Each student's timer starts when they begin.</p>
 
             <div className="mt-5 flex flex-wrap items-center gap-3">
               <button disabled={busy} onClick={() => apply(true)}
@@ -832,6 +847,136 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------- Questions editor (search + fix answer + re-grade) ----------------
+function QuestionsTab({ setError }: { setError: (s: string) => void }) {
+  const [data, setData] = useState<{ rows: QuestionRow[]; total: number; page: number; pageSize: number } | null>(null);
+  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
+  const [page, setPage] = useState(1);
+  const [edit, setEdit] = useState<QuestionRow | null>(null);
+  const [msg, setMsg] = useState('');
+
+  async function load() {
+    try { setData(await api.get<any>(`/api/admin/questions/list?search=${encodeURIComponent(query)}&page=${page}&pageSize=20`)); }
+    catch (e: any) { setError(e.message); }
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [query, page]);
+
+  async function saveEdit() {
+    if (!edit) return;
+    try {
+      await api.post(`/api/admin/questions/${edit.id}`, { question: edit.question, options: edit.options, answerIndex: edit.answerIndex, difficulty: edit.difficulty, explanation: edit.explanation || '' });
+      setEdit(null); load();
+    } catch (e: any) { setError(e.message); }
+  }
+  async function regrade() {
+    if (!window.confirm('Re-grade ALL submitted attempts against the current answer keys? Use this after fixing a wrong answer.')) return;
+    try { const r = await api.post<{ regraded: number; changed: number }>('/api/admin/regrade'); setMsg(`Re-graded ${r.regraded} attempt(s), ${r.changed} score(s) changed.`); setTimeout(() => setMsg(''), 4000); }
+    catch (e: any) { setError(e.message); }
+  }
+  const totalPages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
+
+  return (
+    <div className="space-y-3">
+      <div className="card flex flex-wrap items-center gap-2">
+        <input className="input max-w-sm" placeholder="Search question text / option / topic…" value={search}
+          onChange={(e) => setSearch(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { setPage(1); setQuery(search.trim()); } }} />
+        <button className="btn-primary" onClick={() => { setPage(1); setQuery(search.trim()); }}>Search</button>
+        {query && <button className="btn-ghost" onClick={() => { setSearch(''); setQuery(''); setPage(1); }}>Clear</button>}
+        <button className="btn-ghost ml-auto" onClick={regrade}>♻ Re-grade all</button>
+      </div>
+      {msg && <div className="rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">{msg}</div>}
+      <p className="text-xs text-slate-500">Fix a wrong answer key here, then click <b>Re-grade all</b> to correct already-submitted scores.</p>
+
+      <div className="space-y-2">
+        {data?.rows.map((q, i) => (
+          <div key={q.id} className="card flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="font-medium">{(data.page - 1) * data.pageSize + i + 1}. {q.question}</p>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {q.options.map((o, oi) => (
+                  <span key={oi} className={`rounded px-2 py-0.5 text-xs ${oi === q.answerIndex ? 'bg-green-100 font-semibold text-green-700' : 'bg-slate-100 text-slate-600'}`}>{String.fromCharCode(65 + oi)}. {o}</span>
+                ))}
+              </div>
+              <p className="mt-1 text-[11px] text-slate-400">{q.domain || '—'} · {q.topic} · {q.difficulty}</p>
+            </div>
+            <button className="btn-ghost shrink-0" onClick={() => setEdit({ ...q, options: [...q.options] })}>Edit</button>
+          </div>
+        ))}
+        {data && !data.rows.length && <div className="card text-sm text-slate-400">No questions match.</div>}
+      </div>
+
+      {data && data.total > data.pageSize && (
+        <div className="flex items-center justify-between text-sm text-slate-500">
+          <span>{data.total} question(s) · page {data.page} of {totalPages}</span>
+          <div className="flex gap-2">
+            <button className="btn-ghost" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>← Prev</button>
+            <button className="btn-ghost" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>Next →</button>
+          </div>
+        </div>
+      )}
+
+      {edit && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/30 p-4" onClick={() => setEdit(null)}>
+          <div className="card max-h-[85vh] w-full max-w-xl space-y-3 overflow-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between"><h3 className="font-semibold">Edit question</h3><button className="btn-ghost" onClick={() => setEdit(null)}>Close</button></div>
+            <div><label className="label">Question</label><textarea className="input min-h-[70px]" value={edit.question} onChange={(e) => setEdit({ ...edit, question: e.target.value })} /></div>
+            <label className="label">Options — tick the correct one</label>
+            {edit.options.map((o, oi) => (
+              <div key={oi} className="flex items-center gap-2">
+                <input type="radio" name="ans" checked={edit.answerIndex === oi} onChange={() => setEdit({ ...edit, answerIndex: oi })} className="h-4 w-4 accent-green-600" />
+                <span className="w-5 text-xs font-semibold text-slate-500">{String.fromCharCode(65 + oi)}</span>
+                <input className="input flex-1" value={o} onChange={(e) => { const opts = [...edit.options]; opts[oi] = e.target.value; setEdit({ ...edit, options: opts }); }} />
+              </div>
+            ))}
+            <div className="grid grid-cols-2 gap-3">
+              <div><label className="label">Difficulty</label>
+                <select className="input" value={edit.difficulty} onChange={(e) => setEdit({ ...edit, difficulty: e.target.value })}>
+                  {['EASY', 'MEDIUM', 'HARD'].map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+              </div>
+              <div><label className="label">Explanation</label><input className="input" value={edit.explanation || ''} onChange={(e) => setEdit({ ...edit, explanation: e.target.value })} /></div>
+            </div>
+            <button className="btn-primary w-full" onClick={saveEdit}>Save changes</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------- Tickets ----------------
+function TicketsTab({ setError }: { setError: (s: string) => void }) {
+  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [showResolved, setShowResolved] = useState(false);
+  async function load() { try { setTickets(await api.get<Ticket[]>('/api/admin/tickets')); } catch (e: any) { setError(e.message); } }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); const t = setInterval(load, 20_000); return () => clearInterval(t); }, []);
+  async function resolve(id: string) { try { await api.post(`/api/admin/tickets/${id}/resolve`); load(); } catch (e: any) { setError(e.message); } }
+  const rows = tickets.filter((t) => showResolved || t.status !== 'resolved');
+  const open = tickets.filter((t) => t.status !== 'resolved').length;
+  return (
+    <div className="space-y-3">
+      <div className="card flex items-center justify-between">
+        <h2 className="font-semibold">Student tickets <span className="ml-1 rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-700">{open} open</span></h2>
+        <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={showResolved} onChange={(e) => setShowResolved(e.target.checked)} /> Show resolved</label>
+      </div>
+      {!rows.length ? <div className="card text-sm text-slate-400">No tickets.</div> : rows.map((t) => (
+        <div key={t.id} className={`card flex items-start justify-between gap-3 ${t.status === 'resolved' ? 'opacity-60' : ''}`}>
+          <div>
+            <p className="text-sm"><b className="font-mono text-xs">{t.registrationNumber || '—'}</b> {t.name && `· ${t.name}`} <span className="text-xs text-slate-400">· {new Date(t.createdAt).toLocaleString()}</span></p>
+            <p className="mt-1 text-slate-700">{t.message}</p>
+          </div>
+          {t.status !== 'resolved'
+            ? <button className="btn-primary shrink-0" onClick={() => resolve(t.id)}>Resolve</button>
+            : <span className="shrink-0 rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">resolved</span>}
+        </div>
+      ))}
     </div>
   );
 }

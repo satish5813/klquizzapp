@@ -7,7 +7,7 @@ const J = (v) => JSON.stringify(v ?? null);
 // row mappers: DB snake_case <-> app camelCase
 const toQuestion = (r) => ({ id: r.id, question: r.question, options: r.options, answerIndex: r.answer_index, topic: r.topic, difficulty: r.difficulty, explanation: r.explanation, domain: r.domain || '', norm: r.norm });
 const toStudent = (r) => ({ id: r.id, registrationNumber: r.registration_number, name: r.name, branch: r.branch, section: r.section, domain: r.domain || '', active: r.active === undefined ? true : !!r.active, createdAt: r.created_at });
-const toAttempt = (r) => ({ id: r.id, studentId: r.student_id, questionIds: r.question_ids, answers: r.answers, score: r.score, total: r.total, status: r.status, reason: r.reason, violations: r.violations ?? 0, sessionId: r.session_id || '', lastSeen: r.last_seen || null, startedAt: r.started_at, submittedAt: r.submitted_at });
+const toAttempt = (r) => ({ id: r.id, studentId: r.student_id, questionIds: r.question_ids, answers: r.answers, score: r.score, total: r.total, status: r.status, reason: r.reason, violations: r.violations ?? 0, autoSubmitted: !!r.auto_submitted, durationMin: r.duration_min || null, ip: r.ip || '', sessionId: r.session_id || '', lastSeen: r.last_seen || null, startedAt: r.started_at, submittedAt: r.submitted_at });
 
 export async function makeMysqlDb() {
   const pool = mysql.createPool({
@@ -47,22 +47,31 @@ export async function makeMysqlDb() {
       id VARCHAR(64) PRIMARY KEY, student_id VARCHAR(64) NOT NULL,
       question_ids JSON NOT NULL, answers JSON NOT NULL, score INT NULL, total INT NOT NULL,
       status VARCHAR(16) NOT NULL, reason VARCHAR(64), violations INT NOT NULL DEFAULT 0,
+      auto_submitted TINYINT NOT NULL DEFAULT 0, duration_min INT NULL, ip VARCHAR(64) DEFAULT '',
       session_id VARCHAR(64) DEFAULT '', last_seen VARCHAR(32) NULL,
       started_at VARCHAR(32), submitted_at VARCHAR(32) NULL,
       INDEX ix_student (student_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
-    try { await q('ALTER TABLE attempts ADD COLUMN violations INT NOT NULL DEFAULT 0'); }
-    catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
-    try { await q("ALTER TABLE attempts ADD COLUMN session_id VARCHAR(64) DEFAULT ''"); }
-    catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
-    try { await q('ALTER TABLE attempts ADD COLUMN last_seen VARCHAR(32) NULL'); }
-    catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+    for (const alter of [
+      'ALTER TABLE attempts ADD COLUMN violations INT NOT NULL DEFAULT 0',
+      "ALTER TABLE attempts ADD COLUMN session_id VARCHAR(64) DEFAULT ''",
+      'ALTER TABLE attempts ADD COLUMN last_seen VARCHAR(32) NULL',
+      'ALTER TABLE attempts ADD COLUMN auto_submitted TINYINT NOT NULL DEFAULT 0',
+      'ALTER TABLE attempts ADD COLUMN duration_min INT NULL',
+      "ALTER TABLE attempts ADD COLUMN ip VARCHAR(64) DEFAULT ''",
+    ]) { try { await q(alter); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; } }
     await q(`CREATE TABLE IF NOT EXISTS settings (
       k VARCHAR(64) PRIMARY KEY, v JSON
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS tickets (
+      id VARCHAR(64) PRIMARY KEY, registration_number VARCHAR(64), name VARCHAR(190),
+      message TEXT, status VARCHAR(16) DEFAULT 'open', created_at VARCHAR(32),
+      INDEX ix_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   }
+  const toTicket = (r) => ({ id: r.id, registrationNumber: r.registration_number, name: r.name, message: r.message, status: r.status, createdAt: r.created_at });
 
-  const COL = { answers: 'answers', score: 'score', status: 'status', submittedAt: 'submitted_at', reason: 'reason', violations: 'violations', sessionId: 'session_id', lastSeen: 'last_seen' };
+  const COL = { answers: 'answers', score: 'score', status: 'status', submittedAt: 'submitted_at', reason: 'reason', violations: 'violations', autoSubmitted: 'auto_submitted', durationMin: 'duration_min', ip: 'ip', sessionId: 'session_id', lastSeen: 'last_seen' };
 
   return {
     driver: 'mysql',
@@ -79,6 +88,15 @@ export async function makeMysqlDb() {
         return (await q('SELECT COUNT(*) n FROM questions'))[0].n;
       },
       clear: async () => { await q('DELETE FROM questions'); },
+      get: async (id) => { const r = await q('SELECT * FROM questions WHERE id=?', [id]); return r[0] ? toQuestion(r[0]) : null; },
+      update: async (id, patch) => {
+        const map = { question: 'question', options: 'options', answerIndex: 'answer_index', topic: 'topic', difficulty: 'difficulty', explanation: 'explanation', domain: 'domain' };
+        const sets = [], vals = [];
+        for (const [k, v] of Object.entries(patch)) { if (!map[k]) continue; sets.push(`${map[k]}=?`); vals.push(k === 'options' ? J(v) : v); }
+        if (sets.length) { vals.push(id); await q(`UPDATE questions SET ${sets.join(', ')} WHERE id=?`, vals); }
+        const r = await q('SELECT * FROM questions WHERE id=?', [id]);
+        return r[0] ? toQuestion(r[0]) : null;
+      },
       clearDomain: async (domain) => {
         // match on normalized domain (so "Java Core" == "JavaCore")
         const all = await q('SELECT id, domain FROM questions');
@@ -133,8 +151,8 @@ export async function makeMysqlDb() {
       all: async () => (await q('SELECT * FROM attempts')).map(toAttempt),
       get: async (id) => { const r = await q('SELECT * FROM attempts WHERE id=?', [id]); return r[0] ? toAttempt(r[0]) : null; },
       add: async (a) => {
-        await q('INSERT INTO attempts (id, student_id, question_ids, answers, score, total, status, reason, violations, session_id, last_seen, started_at, submitted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-          [a.id, a.studentId, J(a.questionIds), J(a.answers), a.score, a.total, a.status, a.reason, a.violations || 0, a.sessionId || '', a.lastSeen || null, a.startedAt, a.submittedAt]);
+        await q('INSERT INTO attempts (id, student_id, question_ids, answers, score, total, status, reason, violations, auto_submitted, duration_min, ip, session_id, last_seen, started_at, submitted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          [a.id, a.studentId, J(a.questionIds), J(a.answers), a.score, a.total, a.status, a.reason, a.violations || 0, a.autoSubmitted ? 1 : 0, a.durationMin || null, a.ip || '', a.sessionId || '', a.lastSeen || null, a.startedAt, a.submittedAt]);
         return a;
       },
       update: async (id, patch) => {
@@ -156,6 +174,12 @@ export async function makeMysqlDb() {
     settings: {
       get: async (key) => { const r = await q('SELECT v FROM settings WHERE k=?', [key]); return r[0] ? r[0].v : null; },
       set: async (key, val) => { await q('INSERT INTO settings (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v=VALUES(v)', [key, J(val)]); return val; },
+    },
+
+    tickets: {
+      all: async () => (await q('SELECT * FROM tickets ORDER BY created_at DESC')).map(toTicket),
+      add: async (t) => { await q('INSERT INTO tickets (id, registration_number, name, message, status, created_at) VALUES (?,?,?,?,?,?)', [t.id, t.registrationNumber, t.name, t.message, t.status, t.createdAt]); return t; },
+      update: async (id, patch) => { if ('status' in patch) await q('UPDATE tickets SET status=? WHERE id=?', [patch.status, id]); const r = await q('SELECT * FROM tickets WHERE id=?', [id]); return r[0] ? toTicket(r[0]) : null; },
     },
   };
 }
