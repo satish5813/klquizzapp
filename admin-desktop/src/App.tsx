@@ -808,8 +808,9 @@ const isoToLocalInput = (iso: string | null) => {
   const d = new Date(iso);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
-interface Sched { enabled: boolean; durationMin: number }
+interface Sched { enabled: boolean; durationMin: number; questionCount: number }
 const DURATIONS = [10, 20, 30, 40, 60, 90, 120, 150, 180];
+const QCOUNTS = [10, 20, 30, 40, 50, 60, 75, 90, 100, 120, 150, 200];
 function ScheduleTab({ setError }: { setError: (s: string) => void }) {
   const [domains, setDomains] = useState<string[]>([]);
   const [sched, setSched] = useState<Record<string, Sched>>({});
@@ -828,7 +829,7 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
       const s: Record<string, Sched> = {};
       for (const d of all) {
         const e = r.schedules[d] || {};
-        s[d] = { enabled: !!e.enabled, durationMin: Number(e.durationMin) || 60 };
+        s[d] = { enabled: !!e.enabled, durationMin: Number(e.durationMin) || 60, questionCount: Number(e.questionCount) || 60 };
       }
       setDomains(all); setSched(s); setCounts(stats.byDomain || {});
       setSelected((prev) => (prev && all.includes(prev) ? prev : all[0] || ''));
@@ -845,7 +846,7 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
     if (!selected || !cur) return;
     setBusy(true); setError(''); setMsg('');
     try {
-      await api.post('/api/admin/schedules', { domain: selected, enabled, durationMin: cur.durationMin });
+      await api.post('/api/admin/schedules', { domain: selected, enabled, durationMin: cur.durationMin, questionCount: cur.questionCount });
       setMsg(enabled ? `${selected} exam activated (${cur.durationMin} min).` : `${selected} exam disabled.`); setTimeout(() => setMsg(''), 3000);
       await load();
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
@@ -885,14 +886,24 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
 
         {cur && (
           <>
-            <div className="mt-5">
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Exam duration (each student gets this much time)</label>
-              <select className="rounded-xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-base font-semibold text-slate-800 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
-                value={cur.durationMin} onChange={(e) => upd({ durationMin: Number(e.target.value) })}>
-                {DURATIONS.map((d) => <option key={d} value={d}>{d >= 60 ? `${d / 60} hour${d > 60 ? 's' : ''}${d % 60 ? ` ${d % 60} min` : ''}` : `${d} minutes`}</option>)}
-              </select>
+            <div className="mt-5 grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Exam duration (time per student)</label>
+                <select className="w-full rounded-xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-base font-semibold text-slate-800 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                  value={cur.durationMin} onChange={(e) => upd({ durationMin: Number(e.target.value) })}>
+                  {DURATIONS.map((d) => <option key={d} value={d}>{d >= 60 ? `${d / 60} hour${d > 60 ? 's' : ''}${d % 60 ? ` ${d % 60} min` : ''}` : `${d} minutes`}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">MCQs per exam</label>
+                <select className="w-full rounded-xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-base font-semibold text-slate-800 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                  value={cur.questionCount} onChange={(e) => upd({ questionCount: Number(e.target.value) })}>
+                  {QCOUNTS.map((n) => <option key={n} value={n}>{n} questions</option>)}
+                </select>
+                {qn > 0 && cur.questionCount > qn && <p className="mt-1 text-xs text-amber-600">Only {qn} questions in the bank — students will get {qn}.</p>}
+              </div>
             </div>
-            <p className="mt-2 text-xs text-slate-400">The exam opens immediately on Activate — no fixed date/time. Each student's timer starts when they begin.</p>
+            <p className="mt-2 text-xs text-slate-400">Opens immediately on Activate — no fixed date/time. Each student gets <b>{cur.questionCount}</b> random questions and <b>{cur.durationMin} min</b>.</p>
 
             <div className="mt-5 flex flex-wrap items-center gap-3">
               <button disabled={busy} onClick={() => apply(true)}

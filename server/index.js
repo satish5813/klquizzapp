@@ -193,8 +193,9 @@ async function scheduleStatusFor(domain) {
   const key = Object.keys(all).find((k) => normDomain(k) === normDomain(domain));
   const s = key ? all[key] : null;
   const durationMin = (s && Number(s.durationMin)) || QUIZ_DURATION_MIN;
-  if (!s || !s.enabled) return { open: false, reason: 'not_scheduled', domain, durationMin };
-  return { open: true, reason: 'open', domain, durationMin };
+  const questionCount = (s && Number(s.questionCount)) || QUIZ_SIZE;
+  if (!s || !s.enabled) return { open: false, reason: 'not_scheduled', domain, durationMin, questionCount };
+  return { open: true, reason: 'open', domain, durationMin, questionCount };
 }
 
 app.get('/api/admin/schedules', requireAdmin, async (_req, res) => {
@@ -208,8 +209,9 @@ app.post('/api/admin/schedules', requireAdmin, async (req, res) => {
   if (!domain) return res.status(400).json({ error: 'Domain is required' });
   const enabled = !!req.body?.enabled;
   const durationMin = Math.max(1, Math.min(180, Number(req.body?.durationMin) || QUIZ_DURATION_MIN)); // 1..180 min
+  const questionCount = Math.max(1, Math.min(500, Number(req.body?.questionCount) || QUIZ_SIZE)); // MCQs per exam
   const all = (await db.settings.get('schedules')) || {};
-  all[domain] = { enabled, durationMin };
+  all[domain] = { enabled, durationMin, questionCount };
   await db.settings.set('schedules', all);
   res.json({ domain, ...all[domain] });
 });
@@ -527,7 +529,7 @@ app.post('/api/exam/start', async (req, res) => {
       ? `No questions are available yet for your domain "${student.domain}". Please contact the coordinator.`
       : 'No exam domain is assigned to you. Please contact the coordinator.',
   });
-  const size = Math.min(QUIZ_SIZE, pool.length);
+  const size = Math.min(sch.questionCount || QUIZ_SIZE, pool.length);
   const picked = shuffle(pool).slice(0, size);
   const sid = crypto.randomUUID();
   const attempt = await db.attempts.add({
