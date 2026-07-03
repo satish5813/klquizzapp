@@ -21,6 +21,9 @@ export default function Quiz() {
   const [review, setReview] = useState(false); // review panel
   const [alerted, setAlerted] = useState(false); // 5-minute alert shown once
   const [violations, setViolations] = useState(0);
+  const [saving, setSaving] = useState(false); // manual Save in progress
+  const [saveMsg, setSaveMsg] = useState(''); // "Saved ✓" flash
+  const [lastSaved, setLastSaved] = useState(0); // epoch ms of last successful save
   const violationsRef = useRef(0);
   const endedRef = useRef(false); // true once submitted (stops the guard)
   const submitRef = useRef<() => void>(() => {});
@@ -50,20 +53,42 @@ export default function Quiz() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attemptId, navigate, sid]);
 
-  // --- Auto-save answers + heartbeat: lets a student resume the exact state after a crash ---
+  // --- Save answers to the server (manual Save button + automatic). Keeping the server copy
+  //     fresh means a time-out auto-submit always grades the student's LATEST answers, even
+  //     if their tab was backgrounded and the browser never fired the client submit. ---
+  async function doSave(manual = false) {
+    if (endedRef.current) return;
+    if (manual) setSaving(true);
+    try {
+      const r = await api.post<{ ok: boolean; openElsewhere?: boolean }>(`/api/quiz/${attemptId}/save`, { sessionId: sid, answers: answersRef.current });
+      if (r.openElsewhere && !endedRef.current) { endedRef.current = true; setKicked(true); return; }
+      setLastSaved(nowMs());
+      if (manual) { setSaveMsg('Saved ✓'); setTimeout(() => setSaveMsg(''), 2500); }
+    } catch {
+      if (manual) { setSaveMsg('Save failed — retrying automatically'); setTimeout(() => setSaveMsg(''), 3000); }
+      /* transient network error — answers stay locally and save on the next tick */
+    } finally { if (manual) setSaving(false); }
+  }
+  const saveRef = useRef(doSave);
+  saveRef.current = doSave;
+
+  // Heartbeat + periodic save (also proves this screen is alive for the single-session lock).
   useEffect(() => {
     if (!started) return;
-    const save = async () => {
-      if (endedRef.current) return;
-      try {
-        const r = await api.post<{ ok: boolean; openElsewhere?: boolean }>(`/api/quiz/${attemptId}/save`, { sessionId: sid, answers: answersRef.current });
-        if (r.openElsewhere && !endedRef.current) { endedRef.current = true; setKicked(true); }
-      } catch { /* transient network error — answers stay locally and save next tick */ }
-    };
-    save();
-    const t = setInterval(save, 30_000);
+    saveRef.current();
+    const t = setInterval(() => saveRef.current(), 20_000);
     return () => clearInterval(t);
-  }, [started, attemptId, sid]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [started]);
+
+  // Save shortly after each answer change, so the server always holds the latest answers
+  // and the auto-submit result is exact.
+  useEffect(() => {
+    if (!started) return;
+    const t = setTimeout(() => saveRef.current(), 1200);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [answers, started]);
 
   // --- Countdown: auto-submit when time runs out (server-aligned clock) ---
   useEffect(() => {
@@ -305,14 +330,19 @@ export default function Quiz() {
         {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
         <div className="flex items-center justify-between">
           <button className="btn-ghost" disabled={idx === 0} onClick={() => setIdx((i) => i - 1)}>← Previous</button>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
+            <button className="btn-ghost" onClick={() => saveRef.current(true)} disabled={saving}>{saving ? 'Saving…' : '💾 Save'}</button>
             <button className="btn-ghost" onClick={() => setReview(true)}>Review</button>
             {idx < questions.length - 1
               ? <button className="btn-primary" onClick={() => setIdx((i) => i + 1)}>Next →</button>
               : <button className="btn-primary" disabled={busy || !canSubmit} title={canSubmit ? '' : 'Submit unlocks in the last 5 minutes'} onClick={() => setConfirm(true)}>{canSubmit ? 'Submit exam' : 'Submit 🔒'}</button>}
           </div>
         </div>
-        {!canSubmit && <p className="text-center text-xs text-slate-400">The Submit button unlocks in the last 5 minutes. Keep answering until then.</p>}
+        <p className="text-center text-xs text-slate-400">
+          {saveMsg
+            ? <span className="font-semibold text-emerald-600">{saveMsg}</span>
+            : <>Your answers are saved automatically{lastSaved > 0 ? ` (last saved ${fmt(Math.max(0, Math.round((nowMs() - lastSaved) / 1000)))} ago)` : ''}. {!canSubmit && 'Submit unlocks in the last 5 minutes.'}</>}
+        </p>
       </div>
 
       {/* RIGHT: question number palette */}
@@ -337,8 +367,10 @@ export default function Quiz() {
           <div className="flex items-center gap-2"><span className="h-3 w-3 rounded bg-green-100" /> Answered</div>
           <div className="flex items-center gap-2"><span className="h-3 w-3 rounded bg-slate-100" /> Not answered</div>
         </div>
-        <button className="btn-primary mt-4 w-full" disabled={busy || !canSubmit} title={canSubmit ? '' : 'Submit unlocks in the last 5 minutes'} onClick={() => setConfirm(true)}>{canSubmit ? 'Submit exam' : 'Submit 🔒 (last 5 min)'}</button>
-        <p className="mt-2 text-center text-[11px] text-red-500">Do not exit full screen or switch tabs.</p>
+        <button className="mt-4 w-full rounded-xl bg-slate-100 py-2.5 font-semibold text-slate-700 ring-1 ring-slate-200 transition hover:bg-slate-200 disabled:opacity-50" onClick={() => saveRef.current(true)} disabled={saving}>{saving ? 'Saving…' : '💾 Save answers'}</button>
+        <p className="mt-1 text-center text-[11px] text-emerald-600 min-h-[14px]">{saveMsg}</p>
+        <button className="w-full rounded-xl bg-teal-600 py-2.5 font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-slate-300" disabled={busy || !canSubmit} title={canSubmit ? '' : 'Submit unlocks in the last 5 minutes'} onClick={() => setConfirm(true)}>{canSubmit ? 'Submit exam' : 'Submit 🔒 (last 5 min)'}</button>
+        <p className="mt-2 text-center text-[11px] text-red-500">Auto-submits when time is up. Do not exit full screen or switch tabs.</p>
       </div>
       </div>
     </div>
