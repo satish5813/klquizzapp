@@ -672,11 +672,76 @@ app.post('/api/faculty/login', async (req, res) => {
     };
   });
   const first = students[0];
+  const session = await getAttendanceSession();
+  const posting = await db.attendance.byEmp(empId);
   res.json({
     faculty: { empId, name: first.facultyName || '', section: first.section || '', room: first.room || '', total: students.length },
     summary: { total: students.length, present, absent, submitted, inProgress },
+    attendance: { open: !!session.open, posted: !!posting, postedAt: posting?.postedAt || null, marks: posting?.marks || null },
     students: rows,
   });
+});
+
+/** Faculty SUBMIT attendance for their section — strict: only when open, ONCE (locked). */
+app.post('/api/faculty/attendance', async (req, res) => {
+  const empId = String(req.body?.empId || '').trim();
+  const marks = (req.body?.marks && typeof req.body.marks === 'object') ? req.body.marks : null;
+  if (!empId || !marks) return res.status(400).json({ error: 'Missing attendance data.' });
+  const session = await getAttendanceSession();
+  if (!session.open) return res.status(403).json({ error: 'Attendance is closed. Please ask the coordinator to open it.' });
+  const existing = await db.attendance.byEmp(empId);
+  if (existing) return res.status(409).json({ error: 'You have already submitted attendance — it is locked. Ask the coordinator to revoke it if a change is needed.', postedAt: existing.postedAt });
+  const students = await db.students.byEmpId(empId);
+  if (!students.length) return res.status(404).json({ error: 'No students for this Employee ID.' });
+  const clean = {}; let present = 0;
+  for (const s of students) { const p = !!marks[s.registrationNumber]; clean[s.registrationNumber] = p; if (p) present++; }
+  const rec = { empId, section: students[0].section || '', room: students[0].room || '', facultyName: students[0].facultyName || '', present, absent: students.length - present, total: students.length, marks: clean, postedAt: new Date().toISOString() };
+  await db.attendance.set(rec);
+  res.json({ ok: true, postedAt: rec.postedAt, present, absent: rec.absent, total: rec.total });
+});
+
+// ============ Attendance admin: open / close / clear / revoke / report ============
+const getAttendanceSession = async () => (await db.settings.get('attendance_session')) || { open: false, openedAt: null, closedAt: null };
+app.post('/api/admin/attendance/open', requireAdmin, async (_req, res) => {
+  const ns = { open: true, openedAt: new Date().toISOString(), closedAt: null };
+  await db.settings.set('attendance_session', ns); res.json(ns);
+});
+app.post('/api/admin/attendance/close', requireAdmin, async (_req, res) => {
+  const s = await getAttendanceSession();
+  const ns = { ...s, open: false, closedAt: new Date().toISOString() };
+  await db.settings.set('attendance_session', ns); res.json(ns);
+});
+app.post('/api/admin/attendance/clear', requireAdmin, async (_req, res) => { await db.attendance.clear(); res.json({ ok: true }); });
+app.post('/api/admin/attendance/revoke', requireAdmin, async (req, res) => {
+  const empId = String(req.body?.empId || '').trim();
+  if (!empId) return res.status(400).json({ error: 'empId required' });
+  const removed = await db.attendance.removeByEmp(empId);
+  res.json({ ok: true, removed });
+});
+/** Overall + section-wise attendance report. */
+app.get('/api/admin/attendance/report', requireAdmin, async (_req, res) => {
+  const [students, postings, session] = await Promise.all([db.students.all(), db.attendance.all(), getAttendanceSession()]);
+  const postByEmp = new Map(postings.map((p) => [String(p.empId), p]));
+  const facMap = new Map();
+  for (const s of students) {
+    const e = String(s.empId || ''); if (!e) continue;
+    let f = facMap.get(e);
+    if (!f) { f = { empId: e, facultyName: s.facultyName || '', section: s.section || '', room: s.room || '', total: 0 }; facMap.set(e, f); }
+    f.total++;
+  }
+  const sections = [...facMap.values()].map((f) => {
+    const p = postByEmp.get(f.empId);
+    return { ...f, posted: !!p, postedAt: p?.postedAt || null, present: p ? p.present : 0, absent: p ? p.absent : f.total, pct: p && f.total ? Math.round((p.present / f.total) * 100) : 0 };
+  }).sort((a, b) => String(a.section).localeCompare(String(b.section)));
+  const summary = {
+    faculties: sections.length,
+    posted: sections.filter((s) => s.posted).length,
+    notPosted: sections.filter((s) => !s.posted).length,
+    totalStudents: students.filter((s) => s.empId).length,
+    present: sections.reduce((n, s) => n + s.present, 0),
+    absent: sections.reduce((n, s) => n + (s.posted ? s.absent : 0), 0),
+  };
+  res.json({ session, summary, sections });
 });
 
 // ============ Student: login → instructions → start ============

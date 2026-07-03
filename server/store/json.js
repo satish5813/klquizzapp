@@ -146,4 +146,13 @@ export const jsonDb = {
     recent: async (limit = 500) => read('loginEvents').slice(-Number(limit || 500)).reverse(),
     all: async () => read('loginEvents'),
   },
+
+  // faculty attendance postings — one per faculty (empId). Cleared between events.
+  attendance: {
+    all: async () => read('attendance'),
+    byEmp: async (empId) => read('attendance').find((p) => String(p.empId) === String(empId)) || null,
+    set: async (rec) => { const cur = read('attendance').filter((p) => String(p.empId) !== String(rec.empId)); cur.push(rec); write('attendance', cur); return rec; },
+    removeByEmp: async (empId) => { const cur = read('attendance'); const keep = cur.filter((p) => String(p.empId) !== String(empId)); write('attendance', keep); return cur.length - keep.length; },
+    clear: async () => write('attendance', []),
+  },
 };

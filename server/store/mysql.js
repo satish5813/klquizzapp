@@ -84,9 +84,14 @@ export async function makeMysqlDb() {
       ip VARCHAR(64), ok TINYINT DEFAULT 1, reason VARCHAR(32), created_at VARCHAR(32),
       INDEX ix_reg (registration_number), INDEX ix_created (created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS attendance_postings (
+      emp_id VARCHAR(32) PRIMARY KEY, section VARCHAR(64), room VARCHAR(32), faculty_name VARCHAR(190),
+      present INT DEFAULT 0, absent INT DEFAULT 0, total INT DEFAULT 0, marks JSON, posted_at VARCHAR(32)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   }
   const toTicket = (r) => ({ id: r.id, registrationNumber: r.registration_number, name: r.name, message: r.message, status: r.status, createdAt: r.created_at });
   const toLogin = (r) => ({ id: r.id, registrationNumber: r.registration_number, name: r.name, ip: r.ip || '', ok: !!r.ok, reason: r.reason || '', createdAt: r.created_at });
+  const toPosting = (r) => ({ empId: r.emp_id, section: r.section || '', room: r.room || '', facultyName: r.faculty_name || '', present: r.present ?? 0, absent: r.absent ?? 0, total: r.total ?? 0, marks: r.marks || {}, postedAt: r.posted_at });
 
   const COL = { answers: 'answers', score: 'score', status: 'status', submittedAt: 'submitted_at', reason: 'reason', violations: 'violations', autoSubmitted: 'auto_submitted', durationMin: 'duration_min', ip: 'ip', sessionId: 'session_id', lastSeen: 'last_seen' };
 
@@ -210,6 +215,21 @@ export async function makeMysqlDb() {
       add: async (e) => { await q('INSERT INTO login_events (id, registration_number, name, ip, ok, reason, created_at) VALUES (?,?,?,?,?,?,?)', [e.id, e.registrationNumber, e.name, e.ip, e.ok ? 1 : 0, e.reason || '', e.createdAt]); return e; },
       recent: async (limit = 500) => (await q('SELECT * FROM login_events ORDER BY created_at DESC LIMIT ?', [Number(limit) || 500])).map(toLogin),
       all: async () => (await q('SELECT * FROM login_events')).map(toLogin),
+    },
+
+    attendance: {
+      all: async () => (await q('SELECT * FROM attendance_postings')).map(toPosting),
+      byEmp: async (empId) => { const r = await q('SELECT * FROM attendance_postings WHERE emp_id=?', [String(empId)]); return r[0] ? toPosting(r[0]) : null; },
+      set: async (rec) => {
+        await q(`INSERT INTO attendance_postings (emp_id, section, room, faculty_name, present, absent, total, marks, posted_at)
+                 VALUES (?,?,?,?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE section=VALUES(section), room=VALUES(room), faculty_name=VALUES(faculty_name),
+                 present=VALUES(present), absent=VALUES(absent), total=VALUES(total), marks=VALUES(marks), posted_at=VALUES(posted_at)`,
+          [rec.empId, rec.section, rec.room, rec.facultyName, rec.present, rec.absent, rec.total, J(rec.marks), rec.postedAt]);
+        return rec;
+      },
+      removeByEmp: async (empId) => { const r = await q('DELETE FROM attendance_postings WHERE emp_id=?', [String(empId)]); return r.affectedRows || 0; },
+      clear: async () => { await q('DELETE FROM attendance_postings'); },
     },
   };
 }
