@@ -6,6 +6,7 @@ const TOKEN = process.env.ADMIN_TOKEN || 'testtoken';
 const VUS = Number(process.env.VUS || 300);
 const ROUNDS = Number(process.env.ROUNDS || 8);
 const SAVE_GAP = Number(process.env.SAVE_GAP || 200); // ms between saves (compressed vs real 5s)
+const RAMP = Number(process.env.RAMP ?? 20); // seconds to spread VU starts over (avoids a connect-storm; realistic)
 const DOMAIN = 'LoadTest';
 const N_STUDENTS = VUS;
 const N_QUESTIONS = 120;
@@ -85,9 +86,15 @@ function pct(arr, p) { if (!arr.length) return 0; const a = [...arr].sort((x, y)
   }
   if (process.env.SEED !== '0') { console.log(`--- Seeding (${DOMAIN}) ---`); await seed(); }
   else console.log(`--- Skipping seed (SEED=0), reusing existing ${DOMAIN} data ---`);
-  console.log(`--- Running ${VUS} concurrent virtual students (rounds=${ROUNDS}, save gap=${SAVE_GAP}ms) ---`);
+  console.log(`--- Running ${VUS} virtual students (rounds=${ROUNDS}, save gap=${SAVE_GAP}ms, ramp=${RAMP}s) ---`);
   const t0 = performance.now();
-  await Promise.all(Array.from({ length: VUS }, (_, i) => runVU(i)));
+  // Stagger VU starts over RAMP seconds so we don't open all connections in one instant
+  // (a connect-storm the client/proxy can't absorb). Mirrors real students clicking Start
+  // over a window, not the same millisecond.
+  await Promise.all(Array.from({ length: VUS }, (_, i) => (async () => {
+    if (RAMP > 0) await sleep((i / VUS) * RAMP * 1000);
+    await runVU(i);
+  })()));
   const wall = (performance.now() - t0) / 1000;
   console.log('\n================ RESULTS ================');
   console.log(`virtual students : ${VUS}`);
