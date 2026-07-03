@@ -84,6 +84,13 @@ function pct(arr, p) { if (!arr.length) return 0; const a = [...arr].sort((x, y)
     console.log(`cleanup: "${DOMAIN}" schedule disabled. Test students/questions stay in the isolated "${DOMAIN}" domain; clear attempts via admin "Delete all results" before the real exam.`);
     return;
   }
+  if (process.env.RESET === '1') {
+    // Clear ALL attempts so the same test students can run again (they'd otherwise show
+    // "completed" and be skipped). WARNING: deletes every attempt in the DB — only use
+    // before the real exam / on a DB with no results you need.
+    const c = await post('/api/admin/attempts/clear-all', {}, admin);
+    console.log(`RESET: cleared all attempts (status ${c.status}).`);
+  }
   if (process.env.SEED !== '0') { console.log(`--- Seeding (${DOMAIN}) ---`); await seed(); }
   else console.log(`--- Skipping seed (SEED=0), reusing existing ${DOMAIN} data ---`);
   console.log(`--- Running ${VUS} virtual students (rounds=${ROUNDS}, save gap=${SAVE_GAP}ms, ramp=${RAMP}s) ---`);
