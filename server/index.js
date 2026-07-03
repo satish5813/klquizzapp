@@ -362,6 +362,14 @@ app.post('/api/admin/students/import', requireAdmin, async (req, res) => {
   res.json({ ...r, skipped: errors.length, errors: errors.slice(0, 50) });
 });
 
+/** Delete ALL students in a domain (and their attempts). For removing load-test data. */
+app.post('/api/admin/students/purge-domain', requireAdmin, async (req, res) => {
+  const domain = String(req.body?.domain || '').trim();
+  if (!domain) return res.status(400).json({ error: 'Provide a domain (e.g. LoadTest).' });
+  const removed = await db.students.removeByDomain(domain);
+  res.json({ ok: true, domain, removed });
+});
+
 /** Students list with search, active/inactive filter, and pagination. */
 app.get('/api/admin/students', requireAdmin, async (req, res) => {
   const all = await db.students.all();

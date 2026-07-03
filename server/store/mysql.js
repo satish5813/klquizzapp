@@ -146,6 +146,12 @@ export async function makeMysqlDb() {
         const r = await q('SELECT * FROM students WHERE id=?', [id]);
         return r[0] ? toStudent(r[0]) : null;
       },
+      // Delete every student in a domain (and their attempts). Used to purge load-test data.
+      removeByDomain: async (domain) => {
+        await q('DELETE a FROM attempts a JOIN students s ON a.student_id = s.id WHERE s.domain = ?', [domain]);
+        const r = await q('DELETE FROM students WHERE domain = ?', [domain]);
+        return r.affectedRows || 0;
+      },
       importMany: async (rows) => {
         if (!rows.length) return { added: 0, updated: 0, total: (await q('SELECT COUNT(*) n FROM students'))[0].n };
         const regs = rows.map((r) => r.registrationNumber);

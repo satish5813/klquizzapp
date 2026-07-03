@@ -78,6 +78,15 @@ export const jsonDb = {
       write('students', cur);
       return cur[i];
     },
+    // Delete every student in a domain (and their attempts). Used to purge load-test data.
+    removeByDomain: async (domain) => {
+      const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const studs = read('students');
+      const goneIds = new Set(studs.filter((s) => norm(s.domain) === norm(domain)).map((s) => s.id));
+      write('students', studs.filter((s) => !goneIds.has(s.id)));
+      write('attempts', read('attempts').filter((a) => !goneIds.has(a.studentId)));
+      return goneIds.size;
+    },
     // Upsert a roster by registrationNumber. New rows default to active.
     importMany: async (rows) => {
       const cur = read('students');

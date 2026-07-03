@@ -81,7 +81,10 @@ function pct(arr, p) { if (!arr.length) return 0; const a = [...arr].sort((x, y)
 (async () => {
   if (process.env.CLEAN === '1') {
     await post('/api/admin/schedules', { domain: DOMAIN, enabled: false, durationMin: 180, questionCount: 60, mix: { easy: 40, medium: 40, hard: 20 } }, admin);
-    console.log(`cleanup: "${DOMAIN}" schedule disabled. Test students/questions stay in the isolated "${DOMAIN}" domain; clear attempts via admin "Delete all results" before the real exam.`);
+    // Purge the test students + their attempts (needs the purge-domain endpoint deployed).
+    const p = await post('/api/admin/students/purge-domain', { domain: DOMAIN }, admin);
+    if (p.status === 200) console.log(`cleanup: "${DOMAIN}" schedule disabled, ${p.body?.removed ?? 0} test students purged.`);
+    else console.log(`cleanup: "${DOMAIN}" schedule disabled. (purge-domain not available yet — status ${p.status}; redeploy, then re-run CLEAN=1.) Also delete the "${DOMAIN}" questions in the admin Question bank.`);
     return;
   }
   if (process.env.RESET === '1') {
