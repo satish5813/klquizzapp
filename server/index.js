@@ -458,6 +458,30 @@ app.post('/api/admin/attempts/:id/force-submit', requireAdmin, async (req, res) 
   res.json({ ok: true, score, total: a.total, status: 'submitted' });
 });
 
+/** Force-submit EVERY in-progress attempt, as a background job (safe for thousands).
+ *  Grades each on its saved answers and marks it submitted/auto. Poll GET /jobs/:id. */
+app.post('/api/admin/attempts/force-submit-all', requireAdmin, async (_req, res) => {
+  const jobId = crypto.randomUUID();
+  await jobSet(jobId, { status: 'running', kind: 'force-all', done: 0, total: 0 });
+  (async () => {
+    try {
+      const pending = (await db.attempts.all()).filter((a) => a.status === 'in_progress');
+      const { byId } = await getBank();
+      await jobSet(jobId, { status: 'running', kind: 'force-all', done: 0, total: pending.length });
+      let done = 0;
+      for (const a of pending) {
+        let score = 0;
+        for (const id of a.questionIds) { const q = byId.get(id); if (q && Number(a.answers[id]) === q.answerIndex) score++; }
+        await db.attempts.update(a.id, { score, status: 'submitted', autoSubmitted: true, submittedAt: new Date().toISOString() });
+        done++;
+        if (done % 25 === 0) await jobSet(jobId, { status: 'running', kind: 'force-all', done, total: pending.length });
+      }
+      await jobSet(jobId, { status: 'ready', kind: 'force-all', done, total: pending.length, submitted: done });
+    } catch (e) { await jobSet(jobId, { ...(jobsLocal.get(jobId) || {}), status: 'error', kind: 'force-all', error: e.message }); }
+  })();
+  res.json({ jobId });
+});
+
 // ============ Monitoring: live logins, per-student issue flags ============
 const STUCK_MS = 3 * 60_000; // in_progress but no heartbeat for 3 min => "stuck / disconnected"
 /** Live snapshot + flagged students. Flags: shared-IP, multi-IP, warnings, auto-submit, stuck. */

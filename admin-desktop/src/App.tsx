@@ -1127,6 +1127,7 @@ function MonitoringTab({ onChanged, setError }: { onChanged: () => void; setErro
   const [auto, setAuto] = useState(true);
   const [busy, setBusy] = useState('');
   const [updated, setUpdated] = useState('');
+  const [forceMsg, setForceMsg] = useState('');
 
   async function load() {
     try {
@@ -1152,6 +1153,26 @@ function MonitoringTab({ onChanged, setError }: { onChanged: () => void; setErro
     try { await api.post(url); await load(); onChanged(); } catch (e: any) { setError(e.message); } finally { setBusy(''); }
   }
 
+  async function forceSubmitAll() {
+    const n = data?.summary.inProgress ?? 0;
+    if (!n) { setForceMsg('No in-progress students to submit.'); setTimeout(() => setForceMsg(''), 3000); return; }
+    if (!window.confirm(`Force-submit ALL ${n} in-progress students now? Each is graded on the answers saved so far and marked submitted. (You can still Reopen an individual student afterwards.)`)) return;
+    setBusy('force-all'); setForceMsg('Starting…');
+    try {
+      const { jobId } = await api.post<{ jobId: string }>('/api/admin/attempts/force-submit-all');
+      // poll progress
+      for (let i = 0; i < 3600; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const j = await api.get<{ status: string; done: number; total: number; submitted?: number; error?: string }>(`/api/admin/jobs/${jobId}`);
+        setForceMsg(`Submitting ${j.done}/${j.total}…`);
+        if (j.status === 'ready') { setForceMsg(`✓ Force-submitted ${j.submitted ?? j.done} students.`); break; }
+        if (j.status === 'error') { setError(j.error || 'Force-submit failed'); setForceMsg(''); break; }
+      }
+      await load(); onChanged();
+      setTimeout(() => setForceMsg(''), 6000);
+    } catch (e: any) { setError(e.message); setForceMsg(''); } finally { setBusy(''); }
+  }
+
   const s = data?.summary;
   return (
     <div className="space-y-4">
@@ -1164,8 +1185,13 @@ function MonitoringTab({ onChanged, setError }: { onChanged: () => void; setErro
           <div className="flex items-center gap-2">
             <label className="flex items-center gap-1.5 text-sm"><input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} /> Auto-refresh (8s)</label>
             <button onClick={load} className="rounded-lg bg-white/15 px-3 py-1.5 text-sm font-semibold hover:bg-white/25">↻ Refresh</button>
+            <button onClick={forceSubmitAll} disabled={busy === 'force-all'}
+              className="rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-amber-600 disabled:opacity-60">
+              {busy === 'force-all' ? 'Submitting…' : `⏹ Force-submit all${s?.inProgress ? ` (${s.inProgress})` : ''}`}
+            </button>
           </div>
         </div>
+        {forceMsg && <p className="mt-2 rounded-lg bg-white/15 px-3 py-1.5 text-sm font-medium">{forceMsg}</p>}
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
