@@ -26,7 +26,9 @@ export default function Faculty() {
       const r = await api.post<FacultyResponse>('/api/faculty/login', { empId: id.trim() });
       setData(r); empRef.current = id.trim(); sessionStorage.setItem('kl_emp', id.trim());
       const init: Record<string, boolean> = {};
-      for (const s of r.students) init[s.registrationNumber] = r.attendance.posted && r.attendance.marks ? !!r.attendance.marks[s.registrationNumber] : s.present;
+      // Default everyone to ABSENT (do NOT pre-fill from exam). Faculty marks Present manually.
+      // If already posted, show the faculty's own submitted marks (locked).
+      for (const s of r.students) init[s.registrationNumber] = r.attendance.posted && r.attendance.marks ? !!r.attendance.marks[s.registrationNumber] : false;
       setMarks(init);
     } catch (e: any) { setError(e.message); setData(null); }
     finally { setLoading(false); }
@@ -100,7 +102,7 @@ export default function Faculty() {
         </div>
       ) : att.open ? (
         <div className="rounded-xl bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800 ring-1 ring-amber-200">
-          ✍ Attendance is <b>OPEN</b>. Mark each student Present/Absent, then submit. <b>You can submit only once</b> — it locks after that.
+          ✍ Attendance is <b>OPEN</b>. Everyone starts <b>Absent</b> — tap a student to mark them <b>Present</b>, then submit. <b>You can submit only once</b> — it locks after that.
         </div>
       ) : (
         <div className="rounded-xl bg-slate-100 px-4 py-3 text-sm font-medium text-slate-600 ring-1 ring-slate-200">
