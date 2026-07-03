@@ -142,7 +142,15 @@ app.post('/api/admin/questions/assign-domain', requireAdmin, async (req, res) =>
   res.json({ changed, domain });
 });
 
-const jobs = new Map();
+// Generation/extraction jobs. Kept in a fast local Map on the worker that owns the job,
+// AND mirrored to the shared DB (settings key `job:<id>`) so that under the cluster (3
+// workers) the poll / publish / discard requests — which the proxy load-balances to ANY
+// worker — always find the job. Without this mirror, jobs "disappear" intermittently.
+const jobsLocal = new Map();
+async function jobSet(id, val) { jobsLocal.set(id, val); try { await db.settings.set(`job:${id}`, val); } catch { /* mirror best-effort */ } }
+async function jobGet(id) { return jobsLocal.get(id) || (await db.settings.get(`job:${id}`)); }
+async function jobDel(id) { jobsLocal.delete(id); try { await db.settings.set(`job:${id}`, null); } catch { /* ignore */ } }
+
 app.post('/api/admin/generate', requireAdmin, async (req, res) => {
   // Key may come from the admin desktop app (preferred) or the server env.
   const apiKey = String(req.body?.apiKey || '').trim() || process.env.ANTHROPIC_API_KEY;
@@ -155,31 +163,31 @@ app.post('/api/admin/generate', requireAdmin, async (req, res) => {
   if (syllabus.length < 10) return res.status(400).json({ error: 'Provide a syllabus (min 10 chars)' });
 
   const jobId = crypto.randomUUID();
-  jobs.set(jobId, { status: 'running', collected: 0, target: count, requests: 0, replace, domain });
+  await jobSet(jobId, { status: 'running', collected: 0, target: count, requests: 0, replace, domain });
   (async () => {
     try {
       const { questions, stats } = await generateBank({
         apiKey, model: MODEL, syllabus, target: count, mix,
         existingNorms: await db.questions.normSet(),
-        onProgress: (p) => jobs.set(jobId, { ...jobs.get(jobId), ...p, status: 'running' }),
+        onProgress: (p) => { jobSet(jobId, { ...(jobsLocal.get(jobId) || {}), ...p, status: 'running' }); },
       });
       questions.forEach((q) => { q.domain = domain; }); // tag with the exam domain
       // Hold for PREVIEW — do not save until the admin posts/publishes.
-      jobs.set(jobId, { status: 'ready', collected: questions.length, target: count, requests: stats.requests, stats, replace, domain, questions });
-    } catch (e) { jobs.set(jobId, { ...jobs.get(jobId), status: 'error', error: e.message }); }
+      await jobSet(jobId, { status: 'ready', collected: questions.length, target: count, requests: stats.requests, stats, replace, domain, questions });
+    } catch (e) { await jobSet(jobId, { ...(jobsLocal.get(jobId) || {}), status: 'error', error: e.message }); }
   })();
   res.json({ jobId });
 });
 
-app.get('/api/admin/jobs/:id', requireAdmin, (req, res) => {
-  const job = jobs.get(req.params.id);
+app.get('/api/admin/jobs/:id', requireAdmin, async (req, res) => {
+  const job = await jobGet(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
   res.json(job); // when status==='ready', includes the generated `questions` for preview
 });
 
 /** Publish previewed questions into the bank. */
 app.post('/api/admin/generate/:id/publish', requireAdmin, async (req, res) => {
-  const job = jobs.get(req.params.id);
+  const job = await jobGet(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
   if (job.status !== 'ready') return res.status(409).json({ error: `Nothing to publish (job is ${job.status})` });
   if (job.replace) await db.questions.clear();
@@ -187,13 +195,13 @@ app.post('/api/admin/generate/:id/publish', requireAdmin, async (req, res) => {
   await db.questions.addMany(job.questions);
   invalidateBank();
   const bankTotal = await db.questions.count();
-  jobs.set(req.params.id, { ...job, status: 'published', questions: undefined, bankTotal });
+  await jobSet(req.params.id, { ...job, status: 'published', questions: undefined, bankTotal });
   res.json({ added, bankTotal });
 });
 
 /** Discard previewed questions without saving. */
-app.post('/api/admin/generate/:id/discard', requireAdmin, (req, res) => {
-  jobs.delete(req.params.id);
+app.post('/api/admin/generate/:id/discard', requireAdmin, async (req, res) => {
+  await jobDel(req.params.id);
   res.json({ ok: true });
 });
 
@@ -315,22 +323,22 @@ app.post('/api/admin/import', requireAdmin, async (req, res) => {
 
 /** Use Claude to extract ready-made MCQs from PDF text. Runs as a background
  *  job (poll GET /api/admin/jobs/:id) so long PDFs don't hit the proxy timeout. */
-app.post('/api/admin/parse-mcqs', requireAdmin, (req, res) => {
+app.post('/api/admin/parse-mcqs', requireAdmin, async (req, res) => {
   const apiKey = String(req.body?.apiKey || '').trim() || process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(400).json({ error: 'No Claude API key. Enter it in the desktop app (Question bank tab).' });
   const text = String(req.body?.text || '').trim();
   if (text.length < 20) return res.status(400).json({ error: 'No readable text found in the file.' });
 
   const jobId = crypto.randomUUID();
-  jobs.set(jobId, { status: 'running', kind: 'extract', chunk: 0, chunks: 0, found: 0 });
+  await jobSet(jobId, { status: 'running', kind: 'extract', chunk: 0, chunks: 0, found: 0 });
   (async () => {
     try {
       const { questions } = await extractMcqs({
         apiKey, model: MODEL, text,
-        onProgress: (p) => jobs.set(jobId, { ...jobs.get(jobId), ...p, status: 'running' }),
+        onProgress: (p) => { jobSet(jobId, { ...(jobsLocal.get(jobId) || {}), ...p, status: 'running' }); },
       });
-      jobs.set(jobId, { status: 'ready', kind: 'extract', questions, count: questions.length });
-    } catch (e) { jobs.set(jobId, { ...jobs.get(jobId), status: 'error', error: e.message }); }
+      await jobSet(jobId, { status: 'ready', kind: 'extract', questions, count: questions.length });
+    } catch (e) { await jobSet(jobId, { ...(jobsLocal.get(jobId) || {}), status: 'error', error: e.message }); }
   })();
   res.json({ jobId });
 });
