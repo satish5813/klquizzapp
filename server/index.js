@@ -52,8 +52,15 @@ app.get('/api/health', (_req, res) =>
 app.get('/api/admin/bank/stats', requireAdmin, async (_req, res) => {
   const qs = await db.questions.all();
   const byDomain = {};
-  for (const q of qs) { const d = q.domain || '(none)'; byDomain[d] = (byDomain[d] || 0) + 1; }
-  res.json({ count: qs.length, topics: [...new Set(qs.map((q) => q.topic))].slice(0, 40), byDomain });
+  const byDomainDiff = {}; // { domain: { EASY, MEDIUM, HARD } }
+  for (const q of qs) {
+    const d = q.domain || '(none)';
+    byDomain[d] = (byDomain[d] || 0) + 1;
+    const dd = (byDomainDiff[d] = byDomainDiff[d] || { EASY: 0, MEDIUM: 0, HARD: 0 });
+    const k = String(q.difficulty || 'MEDIUM').toUpperCase();
+    dd[k === 'EASY' || k === 'HARD' ? k : 'MEDIUM']++;
+  }
+  res.json({ count: qs.length, topics: [...new Set(qs.map((q) => q.topic))].slice(0, 40), byDomain, byDomainDiff });
 });
 
 app.post('/api/admin/estimate', requireAdmin, (req, res) => {
@@ -188,14 +195,57 @@ app.post('/api/admin/generate/:id/discard', requireAdmin, (req, res) => {
 // ============ Admin: per-domain exam schedule ============
 // Exams are CLOSED by default. A domain's exam opens only when the admin enables
 // its schedule (optionally within a start/end window).
+// Difficulty composition of an exam. Percentages that always sum to 100.
+// Default = an even-ish spread if the admin never set one.
+const DEFAULT_MIX = { easy: 40, medium: 40, hard: 20 };
+function normMix(m) {
+  const e = Math.max(0, Math.round(Number(m?.easy)) || 0);
+  const md = Math.max(0, Math.round(Number(m?.medium)) || 0);
+  const h = Math.max(0, Math.round(Number(m?.hard)) || 0);
+  const sum = e + md + h;
+  if (sum <= 0) return { ...DEFAULT_MIX };
+  // Re-scale to exactly 100 so callers can trust the percentages.
+  const easy = Math.round((e / sum) * 100);
+  const medium = Math.round((md / sum) * 100);
+  return { easy, medium, hard: 100 - easy - medium };
+}
+const diffKey = (q) => String(q?.difficulty || 'MEDIUM').toUpperCase();
+// Pick `size` questions from `pool` honouring the difficulty mix. If a bucket is
+// short, the shortfall is filled from the remaining questions so students always
+// get a full-length exam.
+function pickByMix(pool, size, mix) {
+  size = Math.min(size, pool.length);
+  const m = normMix(mix);
+  const buckets = {
+    EASY: shuffle(pool.filter((q) => diffKey(q) === 'EASY')),
+    MEDIUM: shuffle(pool.filter((q) => diffKey(q) === 'MEDIUM')),
+    HARD: shuffle(pool.filter((q) => diffKey(q) === 'HARD')),
+  };
+  // Any difficulty label that isn't E/M/H falls back into MEDIUM.
+  const known = new Set(['EASY', 'MEDIUM', 'HARD']);
+  buckets.MEDIUM.push(...shuffle(pool.filter((q) => !known.has(diffKey(q)))));
+  const want = { EASY: Math.round((m.easy / 100) * size), MEDIUM: Math.round((m.medium / 100) * size) };
+  want.HARD = size - want.EASY - want.MEDIUM;
+  const picked = [];
+  for (const k of ['EASY', 'MEDIUM', 'HARD']) picked.push(...buckets[k].splice(0, Math.max(0, want[k])));
+  // Fill any shortfall (a bucket ran out) from whatever questions remain.
+  if (picked.length < size) {
+    const chosen = new Set(picked.map((q) => q.id));
+    const rest = shuffle(pool.filter((q) => !chosen.has(q.id)));
+    picked.push(...rest.slice(0, size - picked.length));
+  }
+  return shuffle(picked).slice(0, size);
+}
+
 async function scheduleStatusFor(domain) {
   const all = (await db.settings.get('schedules')) || {};
   const key = Object.keys(all).find((k) => normDomain(k) === normDomain(domain));
   const s = key ? all[key] : null;
   const durationMin = (s && Number(s.durationMin)) || QUIZ_DURATION_MIN;
   const questionCount = (s && Number(s.questionCount)) || QUIZ_SIZE;
-  if (!s || !s.enabled) return { open: false, reason: 'not_scheduled', domain, durationMin, questionCount };
-  return { open: true, reason: 'open', domain, durationMin, questionCount };
+  const mix = normMix(s && s.mix);
+  if (!s || !s.enabled) return { open: false, reason: 'not_scheduled', domain, durationMin, questionCount, mix };
+  return { open: true, reason: 'open', domain, durationMin, questionCount, mix };
 }
 
 app.get('/api/admin/schedules', requireAdmin, async (_req, res) => {
@@ -210,8 +260,9 @@ app.post('/api/admin/schedules', requireAdmin, async (req, res) => {
   const enabled = !!req.body?.enabled;
   const durationMin = Math.max(1, Math.min(180, Number(req.body?.durationMin) || QUIZ_DURATION_MIN)); // 1..180 min
   const questionCount = Math.max(1, Math.min(500, Number(req.body?.questionCount) || QUIZ_SIZE)); // MCQs per exam
+  const mix = normMix(req.body?.mix); // Easy/Medium/Hard % (always sums to 100)
   const all = (await db.settings.get('schedules')) || {};
-  all[domain] = { enabled, durationMin, questionCount };
+  all[domain] = { enabled, durationMin, questionCount, mix };
   await db.settings.set('schedules', all);
   res.json({ domain, ...all[domain] });
 });
@@ -530,7 +581,7 @@ app.post('/api/exam/start', async (req, res) => {
       : 'No exam domain is assigned to you. Please contact the coordinator.',
   });
   const size = Math.min(sch.questionCount || QUIZ_SIZE, pool.length);
-  const picked = shuffle(pool).slice(0, size);
+  const picked = pickByMix(pool, size, sch.mix); // honour the Easy/Medium/Hard composition
   const sid = crypto.randomUUID();
   const attempt = await db.attempts.add({
     id: crypto.randomUUID(), studentId: student.id, questionIds: picked.map((q) => q.id),

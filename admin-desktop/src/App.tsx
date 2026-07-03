@@ -808,13 +808,35 @@ const isoToLocalInput = (iso: string | null) => {
   const d = new Date(iso);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
-interface Sched { enabled: boolean; durationMin: number; questionCount: number }
+interface Mix { easy: number; medium: number; hard: number }
+interface Sched { enabled: boolean; durationMin: number; questionCount: number; mix: Mix }
+type DiffCounts = { EASY: number; MEDIUM: number; HARD: number };
 const DURATIONS = [10, 20, 30, 40, 60, 90, 120, 150, 180];
 const QCOUNTS = [10, 20, 30, 40, 50, 60, 75, 90, 100, 120, 150, 200];
+const DEFAULT_MIX: Mix = { easy: 40, medium: 40, hard: 20 };
+// Round percentages of `total` to whole question counts that sum EXACTLY to total.
+function mixCounts(mix: Mix, total: number): DiffCounts {
+  const easy = Math.round((mix.easy / 100) * total);
+  const medium = Math.round((mix.medium / 100) * total);
+  return { EASY: easy, MEDIUM: medium, HARD: Math.max(0, total - easy - medium) };
+}
+// Static class strings (Tailwind can't see interpolated names).
+const DIFF_UI = [
+  { key: 'easy' as const, label: 'Easy', dk: 'EASY' as const, text: 'text-emerald-600', dot: 'bg-emerald-500' },
+  { key: 'medium' as const, label: 'Medium', dk: 'MEDIUM' as const, text: 'text-amber-600', dot: 'bg-amber-500' },
+  { key: 'hard' as const, label: 'Hard', dk: 'HARD' as const, text: 'text-rose-600', dot: 'bg-rose-500' },
+];
+const MIX_PRESETS: { name: string; mix: Mix }[] = [
+  { name: 'Balanced', mix: { easy: 40, medium: 40, hard: 20 } },
+  { name: 'Easy-heavy', mix: { easy: 60, medium: 30, hard: 10 } },
+  { name: 'Hard-heavy', mix: { easy: 20, medium: 40, hard: 40 } },
+  { name: 'Even', mix: { easy: 34, medium: 33, hard: 33 } },
+];
 function ScheduleTab({ setError }: { setError: (s: string) => void }) {
   const [domains, setDomains] = useState<string[]>([]);
   const [sched, setSched] = useState<Record<string, Sched>>({});
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const [diffCounts, setDiffCounts] = useState<Record<string, DiffCounts>>({});
   const [selected, setSelected] = useState('');
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
@@ -823,15 +845,20 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
     try {
       const [r, stats] = await Promise.all([
         api.get<{ schedules: Record<string, any>; domains: string[] }>('/api/admin/schedules'),
-        api.get<{ byDomain?: Record<string, number> }>('/api/admin/bank/stats'),
+        api.get<{ byDomain?: Record<string, number>; byDomainDiff?: Record<string, DiffCounts> }>('/api/admin/bank/stats'),
       ]);
       const all = [...new Set([...Object.keys(r.schedules || {}), ...(r.domains || [])])].sort();
       const s: Record<string, Sched> = {};
       for (const d of all) {
         const e = r.schedules[d] || {};
-        s[d] = { enabled: !!e.enabled, durationMin: Number(e.durationMin) || 60, questionCount: Number(e.questionCount) || 60 };
+        const m = e.mix || {};
+        s[d] = {
+          enabled: !!e.enabled, durationMin: Number(e.durationMin) || 60, questionCount: Number(e.questionCount) || 60,
+          mix: { easy: Number(m.easy) || 0, medium: Number(m.medium) || 0, hard: Number(m.hard) || 0 },
+        };
+        if (s[d].mix.easy + s[d].mix.medium + s[d].mix.hard === 0) s[d].mix = { ...DEFAULT_MIX };
       }
-      setDomains(all); setSched(s); setCounts(stats.byDomain || {});
+      setDomains(all); setSched(s); setCounts(stats.byDomain || {}); setDiffCounts(stats.byDomainDiff || {});
       setSelected((prev) => (prev && all.includes(prev) ? prev : all[0] || ''));
     } catch (e: any) { setError(e.message); }
   }
@@ -846,7 +873,7 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
     if (!selected || !cur) return;
     setBusy(true); setError(''); setMsg('');
     try {
-      await api.post('/api/admin/schedules', { domain: selected, enabled, durationMin: cur.durationMin, questionCount: cur.questionCount });
+      await api.post('/api/admin/schedules', { domain: selected, enabled, durationMin: cur.durationMin, questionCount: cur.questionCount, mix: cur.mix });
       setMsg(enabled ? `${selected} exam activated (${cur.durationMin} min).` : `${selected} exam disabled.`); setTimeout(() => setMsg(''), 3000);
       await load();
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
@@ -904,6 +931,54 @@ function ScheduleTab({ setError }: { setError: (s: string) => void }) {
               </div>
             </div>
             <p className="mt-2 text-xs text-slate-400">Opens immediately on Activate — no fixed date/time. Each student gets <b>{cur.questionCount}</b> random questions and <b>{cur.durationMin} min</b>.</p>
+
+            {/* Difficulty composition — how many Easy / Medium / Hard make up the exam */}
+            {(() => {
+              const size = Math.min(cur.questionCount, qn || cur.questionCount);
+              const want = mixCounts(cur.mix, size);
+              const avail = diffCounts[selected];
+              const sum = cur.mix.easy + cur.mix.medium + cur.mix.hard;
+              return (
+                <div className="mt-5 rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Difficulty composition — of {size} question{size === 1 ? '' : 's'}</label>
+                    <span className={`text-xs font-semibold ${sum === 100 ? 'text-emerald-600' : 'text-amber-600'}`}>total {sum}%</span>
+                  </div>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                    {DIFF_UI.map((u) => {
+                      const have = avail ? avail[u.dk] : undefined;
+                      const short = have !== undefined && want[u.dk] > have;
+                      return (
+                        <div key={u.key} className="rounded-lg bg-white p-3 ring-1 ring-slate-200">
+                          <div className="mb-1.5 flex items-center justify-between">
+                            <span className={`flex items-center gap-1.5 text-sm font-semibold ${u.text}`}><span className={`h-2.5 w-2.5 rounded-full ${u.dot}`} />{u.label}</span>
+                            <span className="text-2xl font-extrabold tabular-nums text-slate-800">{want[u.dk]}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <input type="number" min={0} max={100} value={cur.mix[u.key]}
+                              onChange={(e) => { const v = Math.max(0, Math.min(100, Number(e.target.value) || 0)); upd({ mix: { ...cur.mix, [u.key]: v } }); }}
+                              className="w-16 rounded-lg border border-slate-300 px-2 py-1 text-sm font-semibold text-slate-800 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" />
+                            <span className="text-sm text-slate-400">%</span>
+                            <span className={`ml-auto text-[11px] ${short ? 'font-semibold text-red-500' : 'text-slate-400'}`}>{have === undefined ? '' : short ? `only ${have} in bank` : `${have} in bank`}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-medium text-slate-400">Presets:</span>
+                    {MIX_PRESETS.map((p) => (
+                      <button key={p.name} type="button" onClick={() => upd({ mix: p.mix })}
+                        className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 transition hover:bg-teal-100 hover:text-teal-700">{p.name}</button>
+                    ))}
+                  </div>
+                  {DIFF_UI.some((u) => { const have = avail ? avail[u.dk] : undefined; return have !== undefined && want[u.dk] > have; }) && (
+                    <p className="mt-2 text-xs text-amber-600">⚠ Some difficulty has fewer questions in the bank than requested — the shortfall is auto-filled from other difficulties so students still get {size} questions.</p>
+                  )}
+                  {sum !== 100 && <p className="mt-1 text-xs text-slate-400">Percentages are auto-scaled to 100% when you Activate (currently {sum}%).</p>}
+                </div>
+              );
+            })()}
 
             <div className="mt-5 flex flex-wrap items-center gap-3">
               <button disabled={busy} onClick={() => apply(true)}
