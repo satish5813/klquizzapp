@@ -355,8 +355,11 @@ app.post('/api/admin/students/import', requireAdmin, async (req, res) => {
     const branch = String(s.branch ?? '').trim();
     const section = String(s.section ?? '').trim();
     const domain = String(s.domain ?? '').trim();
+    const empId = String(s.empId ?? s.emp_id ?? '').trim();
+    const room = String(s.room ?? '').trim();
+    const facultyName = String(s.facultyName ?? s.faculty_name ?? '').trim();
     if (!registrationNumber || !name) { errors.push({ row: i + 1, reason: 'need registrationNumber and name' }); return; }
-    rows.push({ id: crypto.randomUUID(), registrationNumber, name, branch, section, domain, createdAt: new Date().toISOString() });
+    rows.push({ id: crypto.randomUUID(), registrationNumber, name, branch, section, domain, empId, room, facultyName, createdAt: new Date().toISOString() });
   });
   const r = await db.students.importMany(rows);
   res.json({ ...r, skipped: errors.length, errors: errors.slice(0, 50) });
@@ -636,6 +639,44 @@ app.post('/api/admin/tickets/:id/resolve', requireAdmin, async (req, res) => {
   const t = await db.tickets.update(req.params.id, { status: 'resolved' });
   if (!t) return res.status(404).json({ error: 'Ticket not found' });
   res.json(t);
+});
+
+// ============ Faculty: login by Emp ID → attendance for their section only ============
+/** A faculty enters their Emp ID and sees ONLY their assigned students, with live
+ *  attendance (Present = started the exam) + status + score. Read-only; Emp ID is the key. */
+app.post('/api/faculty/login', async (req, res) => {
+  const empId = String(req.body?.empId || '').trim();
+  if (!empId) return res.status(400).json({ error: 'Enter your Employee ID.' });
+  const students = await db.students.byEmpId(empId);
+  if (!students.length) return res.status(404).json({ error: 'No students are assigned to this Employee ID. Please check the ID.' });
+  const attempts = await db.attempts.all();
+  const byStudent = new Map();
+  for (const a of attempts) byStudent.set(a.studentId, a); // one attempt per student
+  const loggedInRegs = new Set((await db.loginEvents.all()).filter((e) => e.ok).map((e) => e.registrationNumber));
+  let present = 0, submitted = 0, inProgress = 0, absent = 0;
+  const rows = students.map((s) => {
+    const a = byStudent.get(s.id);
+    const started = !!a;
+    const done = a && (a.status === 'submitted' || a.status === 'terminated');
+    if (done) submitted++; else if (a && a.status === 'in_progress') inProgress++;
+    if (started) present++; else absent++;
+    return {
+      registrationNumber: s.registrationNumber, name: s.name, branch: s.branch, section: s.section,
+      loggedIn: loggedInRegs.has(s.registrationNumber),
+      present: started,
+      status: done ? 'submitted' : a && a.status === 'in_progress' ? 'in_progress' : loggedInRegs.has(s.registrationNumber) ? 'logged_in' : 'absent',
+      autoSubmitted: !!(a && a.autoSubmitted),
+      score: done ? (a.score ?? 0) : null, total: a ? a.total : null,
+      percentage: done ? pct(a.score, a.total) : null,
+      startedAt: a ? a.startedAt : null, submittedAt: a ? a.submittedAt : null,
+    };
+  });
+  const first = students[0];
+  res.json({
+    faculty: { empId, name: first.facultyName || '', section: first.section || '', room: first.room || '', total: students.length },
+    summary: { total: students.length, present, absent, submitted, inProgress },
+    students: rows,
+  });
 });
 
 // ============ Student: login → instructions → start ============

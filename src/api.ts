@@ -29,3 +29,5 @@ export interface StudentInfo { registrationNumber: string; name: string; branch:
 export interface AttemptInfo { state: 'none' | 'in_progress' | 'completed'; attemptId?: string; status?: string; score?: number; total?: number; percentage?: number; }
 export interface ScheduleInfo { open: boolean; reason?: 'open' | 'not_scheduled' | 'not_started' | 'closed'; domain?: string; startAt?: string | null; endAt?: string | null; }
 export interface LoginResponse { student: StudentInfo; attempt: AttemptInfo; quizSize: number; durationMin: number; schedule: ScheduleInfo; }
+export interface FacAttendee { registrationNumber: string; name: string; branch: string; section: string; loggedIn: boolean; present: boolean; status: 'submitted' | 'in_progress' | 'logged_in' | 'absent'; autoSubmitted: boolean; score: number | null; total: number | null; percentage: number | null; startedAt: string | null; submittedAt: string | null; }
+export interface FacultyResponse { faculty: { empId: string; name: string; section: string; room: string; total: number }; summary: { total: number; present: number; absent: number; submitted: number; inProgress: number }; students: FacAttendee[]; }

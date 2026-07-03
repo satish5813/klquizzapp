@@ -68,6 +68,7 @@ export const jsonDb = {
     count: async () => read('students').length,
     get: async (id) => read('students').find((s) => s.id === id) || null,
     byRegNo: async (rn) => read('students').find((s) => s.registrationNumber === rn) || null,
+    byEmpId: async (empId) => read('students').filter((s) => String(s.empId || '') === String(empId)).sort((a, b) => String(a.registrationNumber).localeCompare(String(b.registrationNumber))),
     add: async (s) => { const cur = read('students'); cur.push(s); write('students', cur); return s; },
     update: async (id, patch) => {
       const cur = read('students');
@@ -94,7 +95,7 @@ export const jsonDb = {
       let added = 0, updated = 0;
       for (const r of rows) {
         const existing = idx.get(r.registrationNumber);
-        if (existing) { Object.assign(existing, { name: r.name, branch: r.branch, section: r.section, domain: r.domain }); updated++; }
+        if (existing) { Object.assign(existing, { name: r.name, branch: r.branch, section: r.section, domain: r.domain, empId: r.empId, room: r.room, facultyName: r.facultyName }); updated++; }
         else { cur.push({ ...r, active: true }); idx.set(r.registrationNumber, r); added++; }
       }
       write('students', cur);

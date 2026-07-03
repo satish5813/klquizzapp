@@ -6,7 +6,7 @@ const J = (v) => JSON.stringify(v ?? null);
 
 // row mappers: DB snake_case <-> app camelCase
 const toQuestion = (r) => ({ id: r.id, question: r.question, options: r.options, answerIndex: r.answer_index, topic: r.topic, difficulty: r.difficulty, explanation: r.explanation, domain: r.domain || '', norm: r.norm });
-const toStudent = (r) => ({ id: r.id, registrationNumber: r.registration_number, name: r.name, branch: r.branch, section: r.section, domain: r.domain || '', active: r.active === undefined ? true : !!r.active, createdAt: r.created_at });
+const toStudent = (r) => ({ id: r.id, registrationNumber: r.registration_number, name: r.name, branch: r.branch, section: r.section, domain: r.domain || '', empId: r.emp_id || '', room: r.room || '', facultyName: r.faculty_name || '', active: r.active === undefined ? true : !!r.active, createdAt: r.created_at });
 const toAttempt = (r) => ({ id: r.id, studentId: r.student_id, questionIds: r.question_ids, answers: r.answers, score: r.score, total: r.total, status: r.status, reason: r.reason, violations: r.violations ?? 0, autoSubmitted: !!r.auto_submitted, durationMin: r.duration_min || null, ip: r.ip || '', sessionId: r.session_id || '', lastSeen: r.last_seen || null, startedAt: r.started_at, submittedAt: r.submitted_at });
 
 export async function makeMysqlDb() {
@@ -48,6 +48,12 @@ export async function makeMysqlDb() {
     catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
     try { await q("ALTER TABLE students ADD COLUMN domain VARCHAR(64) DEFAULT ''"); }
     catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+    for (const alter of [
+      "ALTER TABLE students ADD COLUMN emp_id VARCHAR(32) DEFAULT ''",       // invigilating faculty
+      "ALTER TABLE students ADD COLUMN room VARCHAR(32) DEFAULT ''",         // exam room
+      "ALTER TABLE students ADD COLUMN faculty_name VARCHAR(190) DEFAULT ''",
+    ]) { try { await q(alter); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; } }
+    try { await q('ALTER TABLE students ADD INDEX ix_emp (emp_id)'); } catch (e) { if (!/duplicate key name/i.test(e.message)) throw e; }
     await q(`CREATE TABLE IF NOT EXISTS attempts (
       id VARCHAR(64) PRIMARY KEY, student_id VARCHAR(64) NOT NULL,
       question_ids JSON NOT NULL, answers JSON NOT NULL, score INT NULL, total INT NOT NULL,
@@ -137,7 +143,8 @@ export async function makeMysqlDb() {
       count: async () => (await q('SELECT COUNT(*) n FROM students'))[0].n,
       get: async (id) => { const r = await q('SELECT * FROM students WHERE id=?', [id]); return r[0] ? toStudent(r[0]) : null; },
       byRegNo: async (rn) => { const r = await q('SELECT * FROM students WHERE registration_number=?', [rn]); return r[0] ? toStudent(r[0]) : null; },
-      add: async (s) => { await q('INSERT INTO students (id, registration_number, name, branch, section, domain, active, created_at) VALUES (?,?,?,?,?,?,1,?)', [s.id, s.registrationNumber, s.name, s.branch, s.section, s.domain || '', s.createdAt]); return s; },
+      byEmpId: async (empId) => (await q('SELECT * FROM students WHERE emp_id=? ORDER BY registration_number', [String(empId)])).map(toStudent),
+      add: async (s) => { await q('INSERT INTO students (id, registration_number, name, branch, section, domain, emp_id, room, faculty_name, active, created_at) VALUES (?,?,?,?,?,?,?,?,?,1,?)', [s.id, s.registrationNumber, s.name, s.branch, s.section, s.domain || '', s.empId || '', s.room || '', s.facultyName || '', s.createdAt]); return s; },
       update: async (id, patch) => {
         const map = { name: 'name', branch: 'branch', section: 'section', domain: 'domain', active: 'active' };
         const sets = [], vals = [];
@@ -156,9 +163,9 @@ export async function makeMysqlDb() {
         if (!rows.length) return { added: 0, updated: 0, total: (await q('SELECT COUNT(*) n FROM students'))[0].n };
         const regs = rows.map((r) => r.registrationNumber);
         const existing = new Set((await q('SELECT registration_number FROM students WHERE registration_number IN (?)', [regs])).map((r) => r.registration_number));
-        const values = rows.map((r) => [r.id, r.registrationNumber, r.name, r.branch, r.section, r.domain || '', 1, r.createdAt]);
-        await q(`INSERT INTO students (id, registration_number, name, branch, section, domain, active, created_at) VALUES ?
-                 ON DUPLICATE KEY UPDATE name=VALUES(name), branch=VALUES(branch), section=VALUES(section), domain=VALUES(domain)`, [values]);
+        const values = rows.map((r) => [r.id, r.registrationNumber, r.name, r.branch, r.section, r.domain || '', r.empId || '', r.room || '', r.facultyName || '', 1, r.createdAt]);
+        await q(`INSERT INTO students (id, registration_number, name, branch, section, domain, emp_id, room, faculty_name, active, created_at) VALUES ?
+                 ON DUPLICATE KEY UPDATE name=VALUES(name), branch=VALUES(branch), section=VALUES(section), domain=VALUES(domain), emp_id=VALUES(emp_id), room=VALUES(room), faculty_name=VALUES(faculty_name)`, [values]);
         const added = rows.filter((r) => !existing.has(r.registrationNumber)).length;
         return { added, updated: rows.length - added, total: (await q('SELECT COUNT(*) n FROM students'))[0].n };
       },
