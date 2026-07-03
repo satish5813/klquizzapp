@@ -25,7 +25,46 @@ innodb_buffer_pool_size = 6G
 
 Keep `DB_POOL * WEB_CONCURRENCY` comfortably **below** `max_connections`.
 
-## Install k6
+## Option A — Node driver (no install, easiest)
+
+`drive.mjs` needs only Node (already installed). It seeds an isolated `LoadTest`
+domain (students `LOADTEST0001…`, 120 questions, an open schedule) and drives VUS
+concurrent students through login → start → save×N → submit, then prints latency
+percentiles, error rate and throughput.
+
+```bash
+# against the VPS (real MySQL — the meaningful test). Use YOUR admin token.
+BASE=https://your-api-host ADMIN_TOKEN=XXXX VUS=1000 node loadtest/drive.mjs
+
+# start smaller and ramp: VUS=500 → 1000 → 2000 → 4200
+# re-run without re-seeding:            SEED=0 ...
+# tear down (disables the LoadTest schedule):  CLEAN=1 ... node loadtest/drive.mjs
+```
+
+Windows PowerShell syntax:
+```powershell
+$env:BASE="https://your-api-host"; $env:ADMIN_TOKEN="XXXX"; $env:VUS="1000"; node loadtest/drive.mjs
+```
+
+> A single laptop can realistically drive ~1000–2000 concurrent connections. For a true
+> 4200 test, run the driver (or k6) from a cloud VM near the VPS, or split across 2–3
+> machines. Run it in a maintenance window; the `LoadTest` domain is isolated from real
+> students, and you clear attempts with the admin "Delete all results" before the real exam.
+
+### Local result (this repo, 2026-07-03)
+
+A 300-VU local run confirmed the app + cluster work end-to-end (login/start/save/submit
+all 200 OK). Two findings, both **JSON dev-store artifacts that do NOT exist on MySQL**:
+- 3 cluster workers on the JSON store → workers clobber the shared file → errors.
+- 1 worker on the JSON store → race-free (0.25% errors) but sync whole-file writes block
+  the thread → high latency.
+
+MySQL is concurrent-safe and does indexed single-row updates, so the real capacity number
+must come from a run against the VPS (above), not the local JSON store.
+
+## Option B — k6
+
+### Install k6
 
 https://k6.io/docs/get-started/installation/ (Windows: `winget install k6` or `choco install k6`).
 
