@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { api, settings, Student, StudentsPage, Attempt, QReport, ReviewItem, QuestionRow, Ticket, Analysis } from './api';
+import { api, settings, Student, StudentsPage, Attempt, QReport, ReviewItem, QuestionRow, Ticket, Analysis, DomainAnalysis } from './api';
 import { extractPdfText } from './pdf';
 
-type Tab = 'overview' | 'users' | 'bank' | 'questions' | 'schedule' | 'results' | 'report' | 'tickets';
+type Tab = 'overview' | 'users' | 'bank' | 'questions' | 'schedule' | 'results' | 'analytics' | 'report' | 'tickets';
 
 export default function App() {
   const [connected, setConnected] = useState(false);
@@ -81,7 +81,7 @@ export default function App() {
 
   const submitted = attempts.filter((a) => a.status === 'submitted').length;
   const terminated = attempts.filter((a) => a.status === 'terminated').length;
-  const tabs: [Tab, string][] = [['overview', 'Overview'], ['users', 'User management'], ['bank', 'Question bank'], ['questions', 'Questions'], ['schedule', 'Schedule'], ['results', 'Results'], ['report', 'Question report'], ['tickets', 'Tickets']];
+  const tabs: [Tab, string][] = [['overview', 'Overview'], ['users', 'User management'], ['bank', 'Question bank'], ['questions', 'Questions'], ['schedule', 'Schedule'], ['results', 'Results'], ['analytics', 'Analytics'], ['report', 'Question report'], ['tickets', 'Tickets']];
 
   return (
     <div className="min-h-screen">
@@ -129,6 +129,7 @@ export default function App() {
         {tab === 'questions' && <QuestionsTab setError={setError} />}
         {tab === 'schedule' && <ScheduleTab setError={setError} />}
         {tab === 'results' && <ResultsTab attempts={attempts} onChanged={loadAll} setError={setError} />}
+        {tab === 'analytics' && <AnalyticsTab setError={setError} />}
         {tab === 'report' && <ReportTab setError={setError} />}
         {tab === 'tickets' && <TicketsTab setError={setError} />}
       </main>
@@ -1055,6 +1056,130 @@ function TicketsTab({ setError }: { setError: (s: string) => void }) {
             : <span className="shrink-0 rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">resolved</span>}
         </div>
       ))}
+    </div>
+  );
+}
+
+// ---------------- Domain-wide class analytics ----------------
+function AnalyticsTab({ setError }: { setError: (s: string) => void }) {
+  const [domains, setDomains] = useState<string[]>([]);
+  const [domain, setDomain] = useState('');
+  const [data, setData] = useState<DomainAnalysis | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    api.get<{ domains: string[] }>('/api/admin/schedules').then((r) => { setDomains(r.domains || []); setDomain((d) => d || r.domains?.[0] || ''); }).catch((e) => setError(e.message));
+  }, [setError]);
+  useEffect(() => {
+    if (!domain) return;
+    setLoading(true);
+    api.get<DomainAnalysis>(`/api/admin/analysis/domain?domain=${encodeURIComponent(domain)}`).then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false));
+  }, [domain, setError]);
+
+  function exportExcel() {
+    if (!data) return;
+    const summary = [
+      { Metric: 'Domain', Value: data.domain }, { Metric: 'Students in domain', Value: data.studentsInDomain },
+      { Metric: 'Attempted', Value: data.attempted }, { Metric: 'Submitted', Value: data.submitted },
+      { Metric: 'Passed (>=75%)', Value: data.passed }, { Metric: 'Failed', Value: data.failed }, { Metric: 'Average %', Value: data.avgPercentage },
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), 'Summary');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(data.byDifficulty.map((d) => ({ Difficulty: d.difficulty, Correct: d.correct, Total: d.total, Percent: d.pct }))), 'By difficulty');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(data.byTopic.map((t) => ({ Topic: t.topic, Correct: t.correct, Total: t.total, Percent: t.pct }))), 'By concept');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(data.students.map((s) => ({
+      'Reg. No': s.registrationNumber, Name: s.name, Branch: s.branch, Section: s.section, Score: s.score, Total: s.total,
+      Percent: s.percentage, Result: s.result, Status: s.status, 'Auto-submitted': s.autoSubmitted ? 'yes' : 'no', Warnings: s.violations, IP: s.ip,
+    }))), 'Students');
+    XLSX.writeFile(wb, `analysis-${data.domain.replace(/\s+/g, '_')}.xlsx`);
+  }
+
+  const pctColor = (p: number) => (p >= 70 ? 'bg-green-500' : p >= 50 ? 'bg-amber-500' : 'bg-red-500');
+  const diffColor = (d?: string) => (d === 'EASY' ? 'bg-green-500' : d === 'HARD' ? 'bg-red-500' : 'bg-amber-500');
+
+  return (
+    <div className="space-y-4">
+      <div className="card flex flex-wrap items-center gap-3">
+        <label className="text-sm font-semibold text-slate-600">Domain</label>
+        <select className="input max-w-xs" value={domain} onChange={(e) => setDomain(e.target.value)}>
+          {domains.map((d) => <option key={d} value={d}>{d}</option>)}
+          <option value="">All domains</option>
+        </select>
+        <button className="btn-primary ml-auto" disabled={!data} onClick={exportExcel}>⬇ Download Excel</button>
+      </div>
+
+      {loading && <p className="text-sm text-slate-400">Loading…</p>}
+      {data && (
+        <>
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
+            <Stat label="Students" value={data.studentsInDomain} />
+            <Stat label="Attempted" value={data.attempted} />
+            <Stat label="Submitted" value={data.submitted} />
+            <Stat label="Passed" value={data.passed} />
+            <Stat label="Failed" value={data.failed} />
+            <Stat label="Avg %" value={data.avgPercentage} />
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="card">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Group mastery by difficulty</p>
+              <div className="space-y-2">
+                {data.byDifficulty.map((d) => (
+                  <div key={d.difficulty} className="flex items-center gap-3 text-sm">
+                    <span className="w-20 font-medium">{d.difficulty}</span>
+                    <Bar pct={d.pct} color={diffColor(d.difficulty)} />
+                    <span className="w-24 text-right text-slate-600">{d.correct}/{d.total} · {d.pct}%</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="card">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Concept mastery (top / bottom)</p>
+              <div className="max-h-40 space-y-1.5 overflow-auto">
+                {data.byTopic.map((t) => (
+                  <div key={t.topic} className="flex items-center gap-3 text-sm">
+                    <span className="w-36 truncate" title={t.topic}>{t.topic}</span>
+                    <Bar pct={t.pct} color={pctColor(t.pct)} />
+                    <span className="w-14 text-right text-slate-600">{t.pct}%</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-xl bg-green-50 p-3">
+              <p className="mb-1 text-xs font-bold uppercase tracking-wide text-green-700">💪 Group strengths</p>
+              {data.strengths.length ? <div className="flex flex-wrap gap-1">{data.strengths.map((s) => <span key={s.topic} className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">{s.topic} ({s.pct}%)</span>)}</div> : <p className="text-xs text-slate-400">—</p>}
+            </div>
+            <div className="rounded-xl bg-red-50 p-3">
+              <p className="mb-1 text-xs font-bold uppercase tracking-wide text-red-700">📉 Group weak areas</p>
+              {data.weaknesses.length ? <div className="flex flex-wrap gap-1">{data.weaknesses.map((s) => <span key={s.topic} className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">{s.topic} ({s.pct}%)</span>)}</div> : <p className="text-xs text-slate-400">—</p>}
+            </div>
+          </div>
+
+          <div className="card overflow-x-auto p-0">
+            <table className="w-full text-sm">
+              <thead className="border-b border-slate-100 bg-slate-50"><tr>{['#', 'Reg. No', 'Name', 'Score', '%', 'Result', 'Auto', 'IP'].map((h) => <th key={h} className="th">{h}</th>)}</tr></thead>
+              <tbody>
+                {data.students.map((s, i) => (
+                  <tr key={s.registrationNumber + i} className="border-b border-slate-50">
+                    <td className="td text-slate-400">{i + 1}</td>
+                    <td className="td font-mono text-xs">{s.registrationNumber}</td>
+                    <td className="td font-medium">{s.name}</td>
+                    <td className="td">{s.score}/{s.total}</td>
+                    <td className="td">{s.percentage}%</td>
+                    <td className="td"><span className={`rounded-full px-2 py-0.5 text-xs font-bold ${s.result === 'PASS' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{s.result}</span></td>
+                    <td className="td">{s.autoSubmitted ? <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-700">auto</span> : '—'}</td>
+                    <td className="td font-mono text-[11px] text-slate-500">{s.ip || '—'}</td>
+                  </tr>
+                ))}
+                {!data.students.length && <tr><td className="td text-slate-400" colSpan={8}>No submitted attempts in this domain yet.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </div>
   );
 }

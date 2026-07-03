@@ -48,5 +48,7 @@ export interface QuestionRow { id: string; question: string; options: string[]; 
 export interface Ticket { id: string; registrationNumber: string; name: string; message: string; status: string; createdAt: string; }
 export interface Bucket { difficulty?: string; topic?: string; correct: number; total: number; pct: number; }
 export interface Analysis { name: string; registrationNumber: string; domain: string; score: number; total: number; percentage: number; byDifficulty: Bucket[]; byTopic: Bucket[]; strengths: Bucket[]; weaknesses: Bucket[]; }
+export interface DomainStudent { registrationNumber: string; name: string; branch: string; section: string; score: number; total: number; percentage: number; result: string; status: string; autoSubmitted: boolean; violations: number; ip: string; }
+export interface DomainAnalysis { domain: string; studentsInDomain: number; attempted: number; submitted: number; passed: number; failed: number; avgPercentage: number; byDifficulty: Bucket[]; byTopic: Bucket[]; strengths: Bucket[]; weaknesses: Bucket[]; students: DomainStudent[]; }
 export interface QReport { id: string; question: string; topic: string; difficulty: string; answered: number; correct: number; pctCorrect: number | null; }
 export interface ReviewItem { question: string; options: string[]; correctIndex: number; yourIndex: number | null; correct: boolean; explanation: string; }

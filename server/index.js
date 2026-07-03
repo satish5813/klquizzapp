@@ -398,6 +398,45 @@ app.get('/api/admin/attempts/:id/analysis', requireAdmin, async (req, res) => {
   });
 });
 
+/** Domain-wide class analysis: group stats, concept mastery, and per-student detail. */
+app.get('/api/admin/analysis/domain', requireAdmin, async (req, res) => {
+  const domain = String(req.query.domain || '').trim();
+  const nd = normDomain(domain);
+  const students = await db.students.all();
+  const inDomain = domain ? students.filter((s) => normDomain(s.domain) === nd) : students;
+  const idSet = new Set(inDomain.map((s) => s.id));
+  const sById = new Map(inDomain.map((s) => [s.id, s]));
+  const { byId } = await getBank();
+  const attempts = (await db.attempts.all()).filter((a) => idSet.has(a.studentId));
+  const submitted = attempts.filter((a) => a.status === 'submitted' || a.status === 'terminated');
+  const diff = { EASY: { c: 0, t: 0 }, MEDIUM: { c: 0, t: 0 }, HARD: { c: 0, t: 0 } };
+  const topicMap = new Map();
+  const studentRows = [];
+  let sumPct = 0, passed = 0;
+  for (const a of submitted) {
+    const s = sById.get(a.studentId) || {};
+    for (const qid of a.questionIds) {
+      const q = byId.get(qid); if (!q) continue;
+      const d = (q.difficulty || 'MEDIUM').toUpperCase(); if (!diff[d]) diff[d] = { c: 0, t: 0 };
+      const ok = a.answers[qid] !== undefined && Number(a.answers[qid]) === q.answerIndex;
+      diff[d].t++; if (ok) diff[d].c++;
+      const tp = q.topic || 'General'; const tm = topicMap.get(tp) || { c: 0, t: 0 }; tm.t++; if (ok) tm.c++; topicMap.set(tp, tm);
+    }
+    const p = pct(a.score, a.total); sumPct += p; if (p >= 75) passed++;
+    studentRows.push({ registrationNumber: s.registrationNumber || '', name: s.name || '', branch: s.branch || '', section: s.section || '', score: a.score ?? 0, total: a.total, percentage: p, result: p >= 75 ? 'PASS' : 'FAIL', status: a.status, autoSubmitted: !!a.autoSubmitted, violations: a.violations ?? 0, ip: a.ip || '' });
+  }
+  const pctOf = (v) => (v.t ? Math.round((v.c / v.t) * 100) : 0);
+  const byDifficulty = Object.entries(diff).map(([k, v]) => ({ difficulty: k, correct: v.c, total: v.t, pct: pctOf(v) }));
+  const byTopic = [...topicMap].map(([topic, v]) => ({ topic, correct: v.c, total: v.t, pct: pctOf(v) })).sort((x, y) => y.pct - x.pct);
+  studentRows.sort((x, y) => y.percentage - x.percentage);
+  res.json({
+    domain: domain || '(all)', studentsInDomain: inDomain.length, attempted: attempts.length, submitted: submitted.length,
+    passed, failed: submitted.length - passed, avgPercentage: submitted.length ? Math.round(sumPct / submitted.length) : 0,
+    byDifficulty, byTopic, strengths: byTopic.filter((t) => t.pct >= 70).slice(0, 8), weaknesses: byTopic.filter((t) => t.pct < 50).sort((x, y) => x.pct - y.pct).slice(0, 8),
+    students: studentRows,
+  });
+});
+
 app.get('/api/admin/report/questions', requireAdmin, async (_req, res) => {
   const subs = (await db.attempts.all()).filter((a) => a.status === 'submitted');
   const byId = new Map((await db.questions.all()).map((q) => [q.id, q]));
