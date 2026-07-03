@@ -125,4 +125,15 @@ export const jsonDb = {
       if (i === -1) return null; cur[i] = { ...cur[i], ...patch }; write('tickets', cur); return cur[i];
     },
   },
+
+  // login events (monitoring). Capped so the file can't grow unbounded.
+  loginEvents: {
+    add: async (e) => {
+      const cur = read('loginEvents'); cur.push(e);
+      if (cur.length > 20000) cur.splice(0, cur.length - 20000);
+      write('loginEvents', cur); return e;
+    },
+    recent: async (limit = 500) => read('loginEvents').slice(-Number(limit || 500)).reverse(),
+    all: async () => read('loginEvents'),
+  },
 };

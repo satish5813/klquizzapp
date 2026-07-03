@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { api, settings, Student, StudentsPage, Attempt, QReport, ReviewItem, QuestionRow, Ticket, Analysis, DomainAnalysis } from './api';
+import { api, settings, Student, StudentsPage, Attempt, QReport, ReviewItem, QuestionRow, Ticket, Analysis, DomainAnalysis, MonitorData, MonitorRow, LoginEvent } from './api';
 import { extractPdfText } from './pdf';
 
-type Tab = 'overview' | 'users' | 'bank' | 'questions' | 'schedule' | 'results' | 'analytics' | 'report' | 'tickets';
+type Tab = 'overview' | 'users' | 'bank' | 'questions' | 'schedule' | 'results' | 'analytics' | 'report' | 'tickets' | 'monitor';
 
 export default function App() {
   const [connected, setConnected] = useState(false);
@@ -81,7 +81,7 @@ export default function App() {
 
   const submitted = attempts.filter((a) => a.status === 'submitted').length;
   const terminated = attempts.filter((a) => a.status === 'terminated').length;
-  const tabs: [Tab, string][] = [['overview', 'Overview'], ['users', 'User management'], ['bank', 'Question bank'], ['questions', 'Questions'], ['schedule', 'Schedule'], ['results', 'Results'], ['analytics', 'Analytics'], ['report', 'Question report'], ['tickets', 'Tickets']];
+  const tabs: [Tab, string][] = [['overview', 'Overview'], ['users', 'User management'], ['bank', 'Question bank'], ['questions', 'Questions'], ['schedule', 'Schedule'], ['results', 'Results'], ['monitor', 'Monitoring'], ['analytics', 'Analytics'], ['report', 'Question report'], ['tickets', 'Tickets']];
 
   return (
     <div className="min-h-screen">
@@ -131,6 +131,7 @@ export default function App() {
         {tab === 'results' && <ResultsTab attempts={attempts} onChanged={loadAll} setError={setError} />}
         {tab === 'analytics' && <AnalyticsTab setError={setError} />}
         {tab === 'report' && <ReportTab setError={setError} />}
+        {tab === 'monitor' && <MonitoringTab onChanged={loadAll} setError={setError} />}
         {tab === 'tickets' && <TicketsTab setError={setError} />}
       </main>
     </div>
@@ -1111,6 +1112,142 @@ function QuestionsTab({ setError }: { setError: (s: string) => void }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------- Monitoring (live logins + issue flags) ----------------
+const SEV_CLS: Record<string, string> = {
+  high: 'bg-red-100 text-red-700', medium: 'bg-amber-100 text-amber-700', info: 'bg-blue-100 text-blue-700',
+};
+function MonitoringTab({ onChanged, setError }: { onChanged: () => void; setError: (s: string) => void }) {
+  const [data, setData] = useState<MonitorData | null>(null);
+  const [logins, setLogins] = useState<LoginEvent[]>([]);
+  const [search, setSearch] = useState('');
+  const [auto, setAuto] = useState(true);
+  const [busy, setBusy] = useState('');
+  const [updated, setUpdated] = useState('');
+
+  async function load() {
+    try {
+      const [m, l] = await Promise.all([
+        api.get<MonitorData>('/api/admin/monitor'),
+        api.get<LoginEvent[]>(`/api/admin/monitor/logins?limit=200${search ? `&search=${encodeURIComponent(search)}` : ''}`),
+      ]);
+      setData(m); setLogins(l); setUpdated(new Date().toLocaleTimeString());
+    } catch (e: any) { setError(e.message); }
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [search]);
+  useEffect(() => {
+    if (!auto) return;
+    const t = setInterval(load, 8000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auto, search]);
+
+  async function act(url: string, id: string, confirmMsg?: string) {
+    if (confirmMsg && !window.confirm(confirmMsg)) return;
+    setBusy(id);
+    try { await api.post(url); await load(); onChanged(); } catch (e: any) { setError(e.message); } finally { setBusy(''); }
+  }
+
+  const s = data?.summary;
+  return (
+    <div className="space-y-4">
+      <div className="rounded-2xl bg-gradient-to-r from-slate-800 to-slate-700 px-6 py-4 text-white shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-lg font-bold">Live Monitoring</h2>
+            <p className="text-sm text-slate-300">Live logins, per-student issue flags, and quick actions. {updated && `Updated ${updated}.`}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1.5 text-sm"><input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} /> Auto-refresh (8s)</label>
+            <button onClick={load} className="rounded-lg bg-white/15 px-3 py-1.5 text-sm font-semibold hover:bg-white/25">↻ Refresh</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+        <Stat label="Live now" value={s?.liveNow ?? 0} />
+        <Stat label="In progress" value={s?.inProgress ?? 0} />
+        <Stat label="Submitted" value={s?.submitted ?? 0} />
+        <Stat label="Auto-submitted" value={s?.autoSubmitted ?? 0} />
+        <Stat label="Flagged" value={s?.flagged ?? 0} />
+        <Stat label="Shared IPs" value={s?.sharedIps ?? 0} />
+      </div>
+
+      {!!data?.sharedIps.length && (
+        <div className="rounded-xl bg-red-50 p-3 ring-1 ring-red-100">
+          <p className="mb-1 text-xs font-bold uppercase tracking-wide text-red-700">⚠ Shared IP addresses (same network / device / proxy)</p>
+          <div className="flex flex-wrap gap-1.5">
+            {data.sharedIps.map((x) => <span key={x.ip} className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">{x.ip} · {x.students} students</span>)}
+          </div>
+        </div>
+      )}
+
+      {/* Flagged + live students */}
+      <div className="rounded-2xl bg-white shadow-sm ring-1 ring-slate-200">
+        <div className="border-b border-slate-100 px-4 py-3">
+          <p className="text-sm font-semibold text-slate-700">Students needing attention <span className="text-slate-400">({data?.rows.length ?? 0})</span></p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-slate-500"><tr>{['Student', 'Section', 'Domain', 'IP', 'Status', 'Flags', 'Actions'].map((h) => <th key={h} className="px-3 py-2 text-left font-semibold">{h}</th>)}</tr></thead>
+            <tbody>
+              {(data?.rows || []).map((r: MonitorRow) => (
+                <tr key={r.attemptId} className="border-b border-slate-50 align-top">
+                  <td className="px-3 py-2"><div className="font-medium text-slate-800">{r.name || '—'}</div><div className="font-mono text-[11px] text-slate-400">{r.registrationNumber}</div></td>
+                  <td className="px-3 py-2 text-slate-600">{r.section}</td>
+                  <td className="px-3 py-2 text-slate-600">{r.domain}</td>
+                  <td className="px-3 py-2"><span className="font-mono text-[11px] text-slate-500">{r.ip || '—'}</span>{r.ipCount > 1 && <span className="ml-1 rounded bg-red-100 px-1 text-[10px] font-semibold text-red-700">×{r.ipCount}</span>}</td>
+                  <td className="px-3 py-2">
+                    {r.live ? <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">● live</span>
+                      : <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">{r.status}</span>}
+                  </td>
+                  <td className="px-3 py-2"><div className="flex flex-wrap gap-1">{r.flags.map((f, i) => <span key={i} className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${SEV_CLS[f.sev]}`}>{f.label}</span>)}</div></td>
+                  <td className="px-3 py-2">
+                    <div className="flex gap-1.5">
+                      {r.status === 'in_progress' && (
+                        <button disabled={busy === r.attemptId} onClick={() => act(`/api/admin/attempts/${r.attemptId}/force-submit`, r.attemptId, `Force-submit ${r.name}'s exam now? It will be graded on the answers saved so far.`)}
+                          className="rounded-lg bg-amber-500 px-2.5 py-1 text-xs font-semibold text-white hover:bg-amber-600 disabled:opacity-50">Force-submit</button>
+                      )}
+                      <button disabled={busy === r.attemptId} onClick={() => act(`/api/admin/attempts/${r.attemptId}/reopen`, r.attemptId, `Revoke ${r.name}'s attempt? It is deleted and they can take the exam again.`)}
+                        className="rounded-lg bg-white px-2.5 py-1 text-xs font-semibold text-red-600 ring-1 ring-red-200 hover:bg-red-50 disabled:opacity-50">Revoke</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {!data?.rows.length && <tr><td colSpan={7} className="px-3 py-6 text-center text-sm text-slate-400">No flags — everything looks clean. Live students appear here while they take the exam.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Recent logins */}
+      <div className="rounded-2xl bg-white shadow-sm ring-1 ring-slate-200">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
+          <p className="text-sm font-semibold text-slate-700">Recent logins <span className="text-slate-400">({logins.length})</span></p>
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search reg no / name / IP" className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-teal-500" />
+        </div>
+        <div className="max-h-80 overflow-auto">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-slate-50 text-slate-500"><tr>{['Time', 'Reg. No', 'Name', 'IP', 'Result'].map((h) => <th key={h} className="px-3 py-2 text-left font-semibold">{h}</th>)}</tr></thead>
+            <tbody>
+              {logins.map((e) => (
+                <tr key={e.id} className="border-b border-slate-50">
+                  <td className="px-3 py-1.5 text-xs text-slate-500">{new Date(e.createdAt).toLocaleString()}</td>
+                  <td className="px-3 py-1.5 font-mono text-[11px]">{e.registrationNumber || '—'}</td>
+                  <td className="px-3 py-1.5">{e.name || '—'}</td>
+                  <td className="px-3 py-1.5 font-mono text-[11px] text-slate-500">{e.ip || '—'}</td>
+                  <td className="px-3 py-1.5">{e.ok ? <span className="rounded-full bg-green-100 px-2 py-0.5 text-[11px] font-semibold text-green-700">ok</span> : <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700">{e.reason || 'failed'}</span>}</td>
+                </tr>
+              ))}
+              {!logins.length && <tr><td colSpan={5} className="px-3 py-6 text-center text-sm text-slate-400">No logins yet.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }

@@ -429,6 +429,73 @@ app.post('/api/admin/attempts/clear-all', requireAdmin, async (_req, res) => {
   res.json({ ok: true, cleared: n });
 });
 
+/** Force-submit ONE in-progress attempt now (grades current answers). The admin
+ *  "revoke like auto-submit" action for a stuck/flagged student. */
+app.post('/api/admin/attempts/:id/force-submit', requireAdmin, async (req, res) => {
+  const a = await db.attempts.get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'Attempt not found' });
+  if (a.status !== 'in_progress') return res.json({ ok: true, already: true, status: a.status, score: a.score ?? 0, total: a.total });
+  const { byId } = await getBank();
+  let score = 0;
+  for (const id of a.questionIds) { const q = byId.get(id); if (q && Number(a.answers[id]) === q.answerIndex) score++; }
+  await db.attempts.update(a.id, { score, status: 'submitted', autoSubmitted: true, submittedAt: new Date().toISOString() });
+  res.json({ ok: true, score, total: a.total, status: 'submitted' });
+});
+
+// ============ Monitoring: live logins, per-student issue flags ============
+const STUCK_MS = 3 * 60_000; // in_progress but no heartbeat for 3 min => "stuck / disconnected"
+/** Live snapshot + flagged students. Flags: shared-IP, multi-IP, warnings, auto-submit, stuck. */
+app.get('/api/admin/monitor', requireAdmin, async (_req, res) => {
+  const now = Date.now();
+  const [attempts, studentsAll, logins] = await Promise.all([db.attempts.all(), db.students.all(), db.loginEvents.all()]);
+  const byId = new Map(studentsAll.map((s) => [s.id, s]));
+  // IP → distinct students (from attempts) → shared-IP detection
+  const ipStudents = new Map();
+  for (const a of attempts) { if (!a.ip) continue; const k = a.ip; const set = ipStudents.get(k) || new Set(); set.add(a.studentId); ipStudents.set(k, set); }
+  const sharedIps = [...ipStudents.entries()].filter(([, set]) => set.size > 1).map(([ip, set]) => ({ ip, students: set.size })).sort((x, y) => y.students - x.students);
+  const sharedIpSet = new Set(sharedIps.map((s) => s.ip));
+  // login events per reg → distinct IPs + count
+  const loginByReg = new Map();
+  for (const e of logins) { const m = loginByReg.get(e.registrationNumber) || { ips: new Set(), count: 0 }; if (e.ip) m.ips.add(e.ip); m.count++; loginByReg.set(e.registrationNumber, m); }
+  let liveNow = 0, inProgress = 0, submitted = 0, autoSubmitted = 0;
+  const rows = [];
+  for (const a of attempts) {
+    const s = byId.get(a.studentId) || {};
+    const live = a.status === 'in_progress' && a.lastSeen && (now - Date.parse(a.lastSeen) < SESSION_ACTIVE_MS);
+    const stuck = a.status === 'in_progress' && (!a.lastSeen || (now - Date.parse(a.lastSeen) > STUCK_MS));
+    if (a.status === 'in_progress') inProgress++; if (a.status === 'submitted' || a.status === 'terminated') submitted++;
+    if (a.autoSubmitted) autoSubmitted++; if (live) liveNow++;
+    const lm = loginByReg.get(s.registrationNumber) || { ips: new Set(), count: 0 };
+    const flags = [];
+    if (a.ip && sharedIpSet.has(a.ip)) flags.push({ code: 'shared_ip', label: `Shared IP (${ipStudents.get(a.ip)?.size || 0} students)`, sev: 'high' });
+    if (lm.ips.size > 1) flags.push({ code: 'multi_ip', label: `Multiple IPs (${lm.ips.size})`, sev: 'high' });
+    if ((a.violations ?? 0) > 0) flags.push({ code: 'warnings', label: `${a.violations} warning${a.violations === 1 ? '' : 's'}`, sev: 'medium' });
+    if (stuck) flags.push({ code: 'stuck', label: 'Stuck / disconnected', sev: 'medium' });
+    if (a.autoSubmitted) flags.push({ code: 'auto', label: 'Auto-submitted', sev: 'info' });
+    if (!flags.length && !live) continue; // only surface rows needing attention (+ live)
+    rows.push({
+      attemptId: a.id, registrationNumber: s.registrationNumber || '', name: s.name || '', section: s.section || '', domain: s.domain || '',
+      ip: a.ip || '', status: a.status, live, stuck, violations: a.violations ?? 0, autoSubmitted: !!a.autoSubmitted,
+      loginCount: lm.count, ipCount: lm.ips.size, startedAt: a.startedAt, flags,
+      sev: flags.some((f) => f.sev === 'high') ? 3 : flags.some((f) => f.sev === 'medium') ? 2 : live ? 1 : 0,
+    });
+  }
+  rows.sort((x, y) => (y.sev - x.sev) || (y.live - x.live) || (y.startedAt || '').localeCompare(x.startedAt || ''));
+  res.json({
+    summary: { liveNow, inProgress, submitted, autoSubmitted, flagged: rows.filter((r) => r.flags.length).length, sharedIps: sharedIps.length, totalAttempts: attempts.length },
+    sharedIps: sharedIps.slice(0, 20), rows,
+  });
+});
+
+/** Recent login history (newest first), optional search on regno/name/ip. */
+app.get('/api/admin/monitor/logins', requireAdmin, async (req, res) => {
+  const limit = Math.max(1, Math.min(2000, Number(req.query.limit) || 300));
+  const search = String(req.query.search || '').trim().toLowerCase();
+  let list = await db.loginEvents.recent(search ? 2000 : limit);
+  if (search) list = list.filter((e) => `${e.registrationNumber} ${e.name} ${e.ip}`.toLowerCase().includes(search)).slice(0, limit);
+  res.json(list);
+});
+
 /** Per-student strength/weakness analysis: by difficulty and by topic (concept). */
 app.get('/api/admin/attempts/:id/analysis', requireAdmin, async (req, res) => {
   const a = await db.attempts.get(req.params.id);
@@ -535,13 +602,18 @@ app.post('/api/admin/tickets/:id/resolve', requireAdmin, async (req, res) => {
 /** Look up a student by registration number (no password). Returns their details + attempt state. */
 app.post('/api/login', async (req, res) => {
   const registrationNumber = String(req.body?.registrationNumber || '').trim();
+  const ip = clientIp(req);
+  // Fire-and-forget login event for the Monitoring tab (never blocks/fails the login).
+  const logLogin = (name, ok, reason) =>
+    db.loginEvents.add({ id: crypto.randomUUID(), registrationNumber, name: name || '', ip, ok, reason, createdAt: new Date().toISOString() }).catch(() => {});
   if (!registrationNumber) return res.status(400).json({ error: 'Enter your registration number' });
   const student = await db.students.byRegNo(registrationNumber);
-  if (!student) return res.status(404).json({ error: 'Registration number not found. Please contact the exam coordinator.' });
-  if (student.active === false) return res.status(403).json({ error: 'Your account is deactivated. Please contact the exam coordinator.' });
+  if (!student) { logLogin('', false, 'not_found'); return res.status(404).json({ error: 'Registration number not found. Please contact the exam coordinator.' }); }
+  if (student.active === false) { logLogin(student.name, false, 'deactivated'); return res.status(403).json({ error: 'Your account is deactivated. Please contact the exam coordinator.' }); }
   const mine = await db.attempts.byStudent(student.id);
   const done = mine.find((a) => a.status === 'submitted' || a.status === 'terminated');
   const inProgress = mine.find((a) => a.status === 'in_progress');
+  logLogin(student.name, true, done ? 'completed' : inProgress ? 'resume' : 'ok');
   res.json({
     student: { registrationNumber: student.registrationNumber, name: student.name, branch: student.branch, section: student.section, domain: student.domain || '' },
     attempt: done ? { state: 'completed', attemptId: done.id, status: done.status, score: done.score ?? 0, total: done.total, percentage: pct(done.score, done.total) }

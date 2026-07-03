@@ -73,8 +73,14 @@ export async function makeMysqlDb() {
       message TEXT, status VARCHAR(16) DEFAULT 'open', created_at VARCHAR(32),
       INDEX ix_status (status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS login_events (
+      id VARCHAR(64) PRIMARY KEY, registration_number VARCHAR(64), name VARCHAR(190),
+      ip VARCHAR(64), ok TINYINT DEFAULT 1, reason VARCHAR(32), created_at VARCHAR(32),
+      INDEX ix_reg (registration_number), INDEX ix_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   }
   const toTicket = (r) => ({ id: r.id, registrationNumber: r.registration_number, name: r.name, message: r.message, status: r.status, createdAt: r.created_at });
+  const toLogin = (r) => ({ id: r.id, registrationNumber: r.registration_number, name: r.name, ip: r.ip || '', ok: !!r.ok, reason: r.reason || '', createdAt: r.created_at });
 
   const COL = { answers: 'answers', score: 'score', status: 'status', submittedAt: 'submitted_at', reason: 'reason', violations: 'violations', autoSubmitted: 'auto_submitted', durationMin: 'duration_min', ip: 'ip', sessionId: 'session_id', lastSeen: 'last_seen' };
 
@@ -185,6 +191,12 @@ export async function makeMysqlDb() {
       all: async () => (await q('SELECT * FROM tickets ORDER BY created_at DESC')).map(toTicket),
       add: async (t) => { await q('INSERT INTO tickets (id, registration_number, name, message, status, created_at) VALUES (?,?,?,?,?,?)', [t.id, t.registrationNumber, t.name, t.message, t.status, t.createdAt]); return t; },
       update: async (id, patch) => { if ('status' in patch) await q('UPDATE tickets SET status=? WHERE id=?', [patch.status, id]); const r = await q('SELECT * FROM tickets WHERE id=?', [id]); return r[0] ? toTicket(r[0]) : null; },
+    },
+
+    loginEvents: {
+      add: async (e) => { await q('INSERT INTO login_events (id, registration_number, name, ip, ok, reason, created_at) VALUES (?,?,?,?,?,?,?)', [e.id, e.registrationNumber, e.name, e.ip, e.ok ? 1 : 0, e.reason || '', e.createdAt]); return e; },
+      recent: async (limit = 500) => (await q('SELECT * FROM login_events ORDER BY created_at DESC LIMIT ?', [Number(limit) || 500])).map(toLogin),
+      all: async () => (await q('SELECT * FROM login_events')).map(toLogin),
     },
   };
 }

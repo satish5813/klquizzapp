@@ -52,3 +52,7 @@ export interface DomainStudent { registrationNumber: string; name: string; branc
 export interface DomainAnalysis { domain: string; studentsInDomain: number; attempted: number; submitted: number; passed: number; failed: number; avgPercentage: number; byDifficulty: Bucket[]; byTopic: Bucket[]; strengths: Bucket[]; weaknesses: Bucket[]; students: DomainStudent[]; }
 export interface QReport { id: string; question: string; topic: string; difficulty: string; answered: number; correct: number; pctCorrect: number | null; }
 export interface ReviewItem { question: string; options: string[]; correctIndex: number; yourIndex: number | null; correct: boolean; explanation: string; }
+export interface MonitorFlag { code: string; label: string; sev: 'high' | 'medium' | 'info'; }
+export interface MonitorRow { attemptId: string; registrationNumber: string; name: string; section: string; domain: string; ip: string; status: string; live: boolean; stuck: boolean; violations: number; autoSubmitted: boolean; loginCount: number; ipCount: number; startedAt: string; flags: MonitorFlag[]; sev: number; }
+export interface MonitorData { summary: { liveNow: number; inProgress: number; submitted: number; autoSubmitted: number; flagged: number; sharedIps: number; totalAttempts: number }; sharedIps: { ip: string; students: number }[]; rows: MonitorRow[]; }
+export interface LoginEvent { id: string; registrationNumber: string; name: string; ip: string; ok: boolean; reason: string; createdAt: string; }
