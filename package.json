@@ -9,7 +9,7 @@
     "dev:web": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "start": "node server/index.js"
+    "start": "node server/start.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

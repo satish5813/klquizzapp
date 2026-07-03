@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
+import cluster from 'node:cluster';
 import { fileURLToPath } from 'url';
 import { initStore } from './db.js';
 import { shuffle, normalizeQuestion } from './util.js';
@@ -35,11 +36,15 @@ const SESSION_ACTIVE_MS = 90_000;
 
 // In-memory question bank cache — avoids a full questions read on every
 // start/quiz/submit, so the API scales to thousands of concurrent students.
-let _bank = null;
+let _bank = null, _bankAt = 0;
+// Short TTL so an answer-key fix propagates across ALL cluster workers (each worker
+// has its own in-memory cache). Explicit invalidate handles the local worker instantly.
+const BANK_TTL_MS = Number(process.env.BANK_TTL_MS || 30_000);
 async function getBank() {
-  if (!_bank) {
+  if (!_bank || (Date.now() - _bankAt) > BANK_TTL_MS) {
     const list = await db.questions.all();
     _bank = { list, byId: new Map(list.map((q) => [q.id, q])) };
+    _bankAt = Date.now();
   }
   return _bank;
 }
@@ -695,6 +700,10 @@ async function finalizeExpired() {
   }
   console.log(`[finalize] auto-submitted ${expired.length} expired attempt(s)`);
 }
-setInterval(() => finalizeExpired().catch((e) => console.error('[finalize]', e.message)), 60_000);
+// Run the auto-finalize sweep in ONE process only: the single worker (id 1) when
+// clustered, or this process when running standalone. Otherwise every worker would
+// redundantly sweep the same attempts each minute.
+const runSweep = !cluster.isWorker || cluster.worker.id === 1;
+if (runSweep) setInterval(() => finalizeExpired().catch((e) => console.error('[finalize]', e.message)), 60_000);
 
-app.listen(PORT, () => console.log(`[${APP_NAME}] server on http://localhost:${PORT}  (model: ${MODEL}, store: ${db.driver})`));
+app.listen(PORT, () => console.log(`[${APP_NAME}] worker ${cluster.worker?.id || 'standalone'} on http://localhost:${PORT}  (model: ${MODEL}, store: ${db.driver})`));

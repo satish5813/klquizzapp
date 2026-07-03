@@ -76,16 +76,17 @@ export default function Quiz() {
   useEffect(() => {
     if (!started) return;
     saveRef.current();
-    const t = setInterval(() => saveRef.current(), 20_000);
+    const t = setInterval(() => saveRef.current(), 25_000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [started]);
 
-  // Save shortly after each answer change, so the server always holds the latest answers
-  // and the auto-submit result is exact.
+  // Save a few seconds after each answer change, so the server always holds the latest
+  // answers and the auto-submit result is exact. Debounced (5s) so a fast-clicking
+  // student generates at most ~1 save every 5s — keeps request rate low at 4000+ scale.
   useEffect(() => {
     if (!started) return;
-    const t = setTimeout(() => saveRef.current(), 1200);
+    const t = setTimeout(() => saveRef.current(), 5000);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [answers, started]);

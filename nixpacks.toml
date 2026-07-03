@@ -15,4 +15,6 @@ cmds = ["npm ci"]
 cmds = ["npx vite build"]
 
 [start]
-cmd = "node server/index.js"
+# Cluster bootstrap: one Node worker per vCPU (WEB_CONCURRENCY overrides).
+# Uses all 4 vCPUs instead of one, so the API scales to thousands of students.
+cmd = "node server/start.js"

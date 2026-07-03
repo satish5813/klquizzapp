@@ -17,8 +17,13 @@ export async function makeMysqlDb() {
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
     waitForConnections: true,
-    connectionLimit: 25,
+    // Per-worker pool. With the cluster (3 workers) the total is DB_POOL * workers,
+    // so keep DB_POOL * workers safely under MySQL's max_connections (default 151).
+    // Default 20 → ~60 total across 3 workers. Raise DB_POOL (and MySQL
+    // max_connections) if a load test shows connection queueing.
+    connectionLimit: Number(process.env.DB_POOL || 20),
     queueLimit: 0,
+    enableKeepAlive: true,
     ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
   });
   const q = async (sql, params) => (await pool.query(sql, params))[0];
