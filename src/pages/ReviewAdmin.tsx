@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, ReviewScores, ReviewInfo, Rubric, AdminBatch, ScoreRow } from '../api';
+import { api, downloadFile, ReviewScores, ReviewInfo, Rubric, AdminBatch, ScoreRow, ReviewAnalytics } from '../api';
 
 const LS = 'kl_att_token';
-type Tab = 'reviews' | 'rubric' | 'scores' | 'batches';
+type Tab = 'reviews' | 'rubric' | 'scores' | 'batches' | 'analytics';
 
 export default function ReviewAdmin() {
   const [token, setToken] = useState(sessionStorage.getItem(LS) || '');
@@ -18,6 +18,7 @@ export default function ReviewAdmin() {
   const [selReview, setSelReview] = useState('');
   const [rubric, setRubric] = useState<Rubric | null>(null);
   const [batches, setBatches] = useState<AdminBatch[]>([]);
+  const [analytics, setAnalytics] = useState<ReviewAnalytics | null>(null);
   const [q, setQ] = useState('');
 
   async function loadAll() {
@@ -35,10 +36,17 @@ export default function ReviewAdmin() {
   }
   async function loadRubric() { try { setRubric(await api.get<Rubric>('/api/admin/review/rubric', hdr())); } catch (e: any) { setError(e.message); } }
   async function loadBatches() { try { const r = await api.get<{ batches: AdminBatch[] }>('/api/admin/review/batches', hdr()); setBatches(r.batches); } catch (e: any) { setError(e.message); } }
+  async function loadAnalytics() { try { setAnalytics(await api.get<ReviewAnalytics>(`/api/admin/review/analytics${selReview ? `?reviewId=${selReview}` : ''}`, hdr())); } catch (e: any) { setError(e.message); } }
 
   useEffect(() => { if (tokenRef.current) loadAll(); /* eslint-disable-next-line */ }, []);
-  useEffect(() => { if (authed) loadAll(); /* eslint-disable-next-line */ }, [selReview]);
-  useEffect(() => { if (authed && tab === 'rubric' && !rubric) loadRubric(); if (authed && tab === 'batches' && !batches.length) loadBatches(); /* eslint-disable-next-line */ }, [tab, authed]);
+  useEffect(() => { if (authed) { loadAll(); if (tab === 'analytics') loadAnalytics(); } /* eslint-disable-next-line */ }, [selReview]);
+  useEffect(() => { if (authed && tab === 'rubric' && !rubric) loadRubric(); if (authed && tab === 'batches' && !batches.length) loadBatches(); if (authed && tab === 'analytics') loadAnalytics(); /* eslint-disable-next-line */ }, [tab, authed]);
+
+  async function downloadExcel() {
+    setBusy('xlsx');
+    try { await downloadFile(`/api/admin/review/analytics.xlsx${selReview ? `?reviewId=${selReview}` : ''}`, `review-analytics.xlsx`, hdr()); }
+    catch (e: any) { setError(e.message); } finally { setBusy(''); }
+  }
 
   async function act(url: string, body?: any, confirmMsg?: string, key = url) {
     if (confirmMsg && !window.confirm(confirmMsg)) return;
@@ -85,7 +93,7 @@ export default function ReviewAdmin() {
       </div>
       {error && <div className="rounded-xl bg-red-50 px-4 py-2 text-sm text-red-700">{error}</div>}
       <div className="flex flex-wrap gap-1.5">
-        {(['reviews', 'rubric', 'scores', 'batches'] as Tab[]).map((t) => (
+        {(['reviews', 'rubric', 'scores', 'analytics', 'batches'] as Tab[]).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`rounded-full px-4 py-1.5 text-sm font-semibold capitalize ${tab === t ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{t}</button>
         ))}
       </div>
@@ -164,6 +172,50 @@ export default function ReviewAdmin() {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {tab === 'analytics' && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <select value={selReview} onChange={(e) => setSelReview(e.target.value)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-semibold outline-none focus:border-indigo-500">
+              {reviews.slice().reverse().map((r) => <option key={r.id} value={r.id}>{r.name}{r.open ? ' (open)' : ''}</option>)}
+            </select>
+            <button disabled={busy === 'xlsx'} onClick={downloadExcel} className="ml-auto rounded-lg bg-emerald-600 px-4 py-1.5 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-50">{busy === 'xlsx' ? 'Preparing…' : '⬇ Download Excel report'}</button>
+          </div>
+          {analytics && (
+            <>
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+                {[['Batches', analytics.summary.batches], ['Students', analytics.summary.students], ['Scored', analytics.summary.scored], ['Present', analytics.summary.present], ['Absent', analytics.summary.absent], ['Avg / ' + analytics.summary.maxTotal, analytics.summary.avg]].map(([l, v]) => (
+                  <div key={l as string} className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-100"><p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{l}</p><p className="mt-1 text-2xl font-extrabold text-slate-800">{v}</p></div>
+                ))}
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                {[['By Section', analytics.bySection], ['By Faculty', analytics.byFaculty]].map(([title, list]) => (
+                  <div key={title as string} className="overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200">
+                    <p className="border-b border-slate-100 bg-slate-50 px-3 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">{title as string}</p>
+                    <div className="max-h-80 overflow-auto">
+                      <table className="w-full text-sm">
+                        <thead className="text-slate-400"><tr>{[title === 'By Section' ? 'Section' : 'Faculty', 'Scored', 'Pres', 'Abs', 'Avg'].map((h) => <th key={h} className="px-3 py-1.5 text-left font-semibold">{h}</th>)}</tr></thead>
+                        <tbody>
+                          {(list as any[]).map((g) => (
+                            <tr key={g.key} className="border-t border-slate-50">
+                              <td className="px-3 py-1.5 font-semibold text-slate-700">{g.key}</td>
+                              <td className="px-3 py-1.5">{g.scored}/{g.students}</td>
+                              <td className="px-3 py-1.5 text-green-600">{g.present}</td>
+                              <td className="px-3 py-1.5 text-red-500">{g.absent}</td>
+                              <td className="px-3 py-1.5 font-bold">{g.avg}</td>
+                            </tr>
+                          ))}
+                          {!(list as any[]).length && <tr><td colSpan={5} className="px-3 py-4 text-center text-slate-400">No data.</td></tr>}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       )}
 

@@ -1,6 +1,16 @@
 // In local dev this is '' (Vite proxies /api → backend). On Vercel set
 // VITE_API_URL to the Hostinger API origin, e.g. https://quiz-api.yourdomain.com
 const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+export const apiBase = API_BASE;
+// Authenticated binary download (e.g. .xlsx) — fetches with headers and saves the blob.
+export async function downloadFile(path: string, filename: string, headers?: Record<string, string>) {
+  const res = await fetch(API_BASE + path, { headers });
+  if (!res.ok) throw new Error(`Download failed (HTTP ${res.status})`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(API_BASE + path, {
@@ -38,9 +48,11 @@ export interface AttReport { sessions: AttSessionInfo[]; session: AttSessionInfo
 // ---- Review system ----
 export interface RubricTable { name: string; criteria: string[]; }
 export interface Rubric { levels: number[]; tables: RubricTable[]; }
-export interface ReviewMemberRow { reg: string; name: string; present: boolean; scores: Record<string, number>; total: number; }
+export interface ReviewMemberRow { reg: string; name: string; present: boolean; scores: Record<string, number>; total: number; percentage: number | null; grade: string; }
 export interface ReviewBatch { id: string; batchNo: string; project: string; ps: string; members: { reg: string; name: string }[]; submitted: boolean; rows: ReviewMemberRow[]; }
-export interface FacultyReview { faculty: { empId: string; name: string; section: string; room: string; batches: number }; review: { id: string; name: string } | null; rubric: Rubric; batches: ReviewBatch[]; }
+export interface FacultyReview { faculty: { empId: string; name: string; section: string; room: string; batches: number }; review: { id: string; name: string } | null; rubric: Rubric; maxTotal: number; batches: ReviewBatch[]; }
+export interface AnalyticsAgg { key: string; students: number; scored: number; present: number; absent: number; avg: number; }
+export interface ReviewAnalytics { review: ReviewInfo | null; rubric: Rubric; summary: { review: string; batches: number; students: number; scored: number; present: number; absent: number; avg: number; maxTotal: number }; bySection: AnalyticsAgg[]; byFaculty: AnalyticsAgg[]; students: { section: string; batchNo: string; facultyName: string; reg: string; name: string; present: boolean | null; total: number | null; percentage: number | null; grade: string; scored: boolean }[]; }
 export interface ReviewInfo { id: string; name: string; open: boolean; createdAt: string; }
 export interface AdminBatch { id: string; section: string; batchNo: string; empId: string; facultyName: string; room: string; project: string; ps: string; members: { reg: string; name: string }[]; }
 export interface ScoreRow { section: string; batchNo: string; empId: string; facultyName: string; project: string; ps: string; reg: string; name: string; present: boolean | null; total: number | null; scored: boolean; }

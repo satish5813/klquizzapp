@@ -4,6 +4,7 @@ import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import cluster from 'node:cluster';
+import * as XLSX from 'xlsx';
 import { fileURLToPath } from 'url';
 import { initStore } from './db.js';
 import { shuffle, normalizeQuestion } from './util.js';
@@ -811,9 +812,9 @@ app.get('/api/admin/attendance/report', requireAdmin, async (req, res) => {
 const DEFAULT_RUBRIC = {
   levels: [2, 4, 6, 8, 10],
   tables: [
-    { name: 'Review 1', criteria: ['Problem Understanding', 'Design & Approach', 'Implementation', 'Demonstration', 'Individual Contribution'] },
-    { name: 'Review 2', criteria: ['Progress', 'Code Quality', 'Feature Completeness', 'Testing', 'Individual Contribution'] },
-    { name: 'Review 3', criteria: ['Final Implementation', 'Innovation', 'Documentation', 'Presentation', 'Individual Contribution'] },
+    { name: 'Review 1 — Design', criteria: ['Problem Understanding', 'Solution Design & Architecture', 'Feasibility & Innovation', 'Planning & Team Roles', 'Individual Contribution'] },
+    { name: 'Review 2 — Development', criteria: ['Implementation Progress', 'Code Quality & Structure', 'Core Functionality', 'Testing & Debugging', 'Individual Contribution'] },
+    { name: 'Review 3 — Final', criteria: ['Completeness & Demo', 'Innovation & Impact', 'Documentation', 'Presentation & Communication', 'Individual Contribution'] },
   ],
 };
 const getRubric = async () => (await db.settings.get('review_rubric')) || DEFAULT_RUBRIC;
@@ -837,16 +838,23 @@ app.post('/api/faculty/review', async (req, res) => {
   const facultyName = batches[0]?.facultyName || students[0]?.facultyName || '';
   const section = batches[0]?.section || students[0]?.section || '';
   const room = batches[0]?.room || students[0]?.room || '';
+  const nCriteria = rubric.tables.reduce((n, t) => n + t.criteria.length, 0);
+  const maxLevel = Math.max(0, ...(rubric.levels.length ? rubric.levels : [0]));
+  const maxTotal = nCriteria * maxLevel;
+  const gradeOf = (pct) => (pct == null ? '' : pct >= 85 ? 'Outstanding' : pct >= 70 ? 'Good' : pct >= 50 ? 'Average' : 'Needs Improvement');
   res.json({
     faculty: { empId, name: facultyName, section, room, batches: batches.length },
     review: active ? { id: active.id, name: active.name } : null,
-    rubric,
+    rubric, maxTotal, maxLevel,
     batches: batches.map((b) => ({
       id: b.id, batchNo: b.batchNo, project: b.project, ps: b.ps, members: b.members || [],
       submitted: active ? Object.keys(byBatch[b.id] || {}).length > 0 : false,
       rows: (b.members || []).map((m) => {
         const sc = active ? (byBatch[b.id] || {})[m.reg] : null;
-        return { reg: m.reg, name: m.name, present: sc ? sc.present : true, scores: sc ? sc.scores : {}, total: sc ? sc.total : 0 };
+        const total = sc ? sc.total : 0;
+        const nScored = sc ? Object.keys(sc.scores || {}).length : 0; // % over criteria actually scored
+        const pct = sc && sc.present && nScored ? Math.round((total / (nScored * maxLevel)) * 100) : null;
+        return { reg: m.reg, name: m.name, present: sc ? sc.present : true, scores: sc ? sc.scores : {}, total, percentage: pct, grade: gradeOf(pct) };
       }),
     })),
   });
@@ -944,6 +952,90 @@ app.get('/api/admin/review/scores', requireAdmin, async (req, res) => {
     }
   }
   res.json({ reviews, review, rubric: await getRubric(), summary: { batches: batches.length, students: rows.length, scored: rows.filter((r) => r.scored).length }, rows });
+});
+
+/** Build rich per-student + high-level analysis for a review. Shared by JSON + Excel. */
+async function buildReviewAnalytics(reviewId) {
+  const reviews = await getReviews();
+  const review = reviews.find((r) => r.id === reviewId) || reviews.find((r) => r.open) || reviews[reviews.length - 1] || null;
+  const rubric = await getRubric();
+  const batches = await db.reviewBatches.all();
+  const scores = review ? await db.reviewScores.byReview(review.id) : [];
+  const scMap = new Map(scores.map((s) => [s.batchId + '|' + s.reg, s]));
+  const flatCriteria = []; // [{key, table, label}]
+  rubric.tables.forEach((t, ti) => t.criteria.forEach((c, ci) => flatCriteria.push({ key: `t${ti}_c${ci}`, table: t.name, label: c })));
+  const maxLevel = Math.max(0, ...(rubric.levels.length ? rubric.levels : [0]));
+  const students = [];
+  for (const b of batches) {
+    for (const m of (b.members || [])) {
+      const sc = scMap.get(b.id + '|' + m.reg);
+      const scoresObj = sc ? sc.scores || {} : {};
+      const total = sc ? sc.total : null;
+      const nScored = Object.keys(scoresObj).length;
+      const outOf = nScored * maxLevel; // % over criteria actually scored
+      const pct = sc && sc.present && outOf ? Math.round((sc.total / outOf) * 100) : null;
+      const grade = pct == null ? '' : pct >= 85 ? 'Outstanding' : pct >= 70 ? 'Good' : pct >= 50 ? 'Average' : 'Needs Improvement';
+      students.push({
+        section: b.section, batchNo: b.batchNo, empId: b.empId, facultyName: b.facultyName, room: b.room,
+        project: b.project, ps: b.ps, reg: m.reg, name: m.name,
+        present: sc ? sc.present : null, scored: !!sc, total, maxTotal: outOf, percentage: pct, grade,
+        criteria: flatCriteria.map((fc) => ({ ...fc, value: scoresObj[fc.key] ?? null })),
+      });
+    }
+  }
+  // high-level aggregates
+  const agg = (keyFn) => {
+    const m = new Map();
+    for (const s of students) {
+      const k = keyFn(s); if (k === undefined || k === null || k === '') continue;
+      const g = m.get(k) || { key: k, students: 0, scored: 0, present: 0, absent: 0, totalSum: 0 };
+      g.students++; if (s.scored) { g.scored++; g.totalSum += s.total || 0; if (s.present) g.present++; else g.absent++; }
+      m.set(k, g);
+    }
+    return [...m.values()].map((g) => ({ ...g, avg: g.scored ? Math.round((g.totalSum / g.scored) * 10) / 10 : 0 })).sort((a, b) => String(a.key).localeCompare(String(b.key)));
+  };
+  const scoredStudents = students.filter((s) => s.scored);
+  const summary = {
+    review: review?.name || '', batches: batches.length, students: students.length,
+    scored: scoredStudents.length, present: scoredStudents.filter((s) => s.present).length, absent: scoredStudents.filter((s) => s.present === false).length,
+    avg: scoredStudents.length ? Math.round((scoredStudents.reduce((n, s) => n + (s.total || 0), 0) / scoredStudents.length) * 10) / 10 : 0,
+    maxTotal: flatCriteria.length * maxLevel,
+  };
+  return { review, rubric, flatCriteria, students, bySection: agg((s) => s.section), byFaculty: agg((s) => s.facultyName || s.empId), summary };
+}
+
+app.get('/api/admin/review/analytics', requireAdmin, async (req, res) => {
+  const a = await buildReviewAnalytics(String(req.query.reviewId || '').trim());
+  res.json(a);
+});
+
+/** High-level + per-student analysis as a real .xlsx workbook. */
+app.get('/api/admin/review/analytics.xlsx', requireAdmin, async (req, res) => {
+  const a = await buildReviewAnalytics(String(req.query.reviewId || '').trim());
+  const wb = XLSX.utils.book_new();
+  // Sheet 1: Student Performance (one row per student, a column per criterion)
+  const perf = a.students.map((s) => {
+    const row = { Section: s.section, Batch: s.batchNo, Faculty: s.facultyName, 'Emp ID': s.empId, Project: s.project, PS: s.ps, 'Reg No': s.reg, Name: s.name, Present: s.present == null ? '' : s.present ? 'Present' : 'Absent' };
+    s.criteria.forEach((c) => { row[`${c.table} · ${c.label}`] = c.value ?? ''; });
+    row.Total = s.total ?? ''; row['Max'] = s.maxTotal; row['%'] = s.percentage ?? ''; row.Grade = s.grade;
+    return row;
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(perf.length ? perf : [{ Note: 'No scores yet' }]), 'Student Performance');
+  // Sheet 2: By Section
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(a.bySection.map((g) => ({ Section: g.key, Students: g.students, Scored: g.scored, Present: g.present, Absent: g.absent, 'Avg Total': g.avg }))), 'By Section');
+  // Sheet 3: By Faculty
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(a.byFaculty.map((g) => ({ Faculty: g.key, Students: g.students, Scored: g.scored, Present: g.present, Absent: g.absent, 'Avg Total': g.avg }))), 'By Faculty');
+  // Sheet 4: Summary
+  const s = a.summary;
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+    { Metric: 'Review', Value: s.review }, { Metric: 'Batches', Value: s.batches }, { Metric: 'Students', Value: s.students },
+    { Metric: 'Scored', Value: s.scored }, { Metric: 'Present', Value: s.present }, { Metric: 'Absent', Value: s.absent },
+    { Metric: 'Average total', Value: s.avg }, { Metric: 'Max total', Value: s.maxTotal },
+  ]), 'Summary');
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  res.setHeader('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('content-disposition', `attachment; filename="review-analytics-${(a.review?.name || 'report').replace(/[^a-z0-9]+/gi, '_')}.xlsx"`);
+  res.send(buf);
 });
 
 // ============ Student: login → instructions → start ============
