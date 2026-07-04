@@ -673,12 +673,17 @@ app.post('/api/faculty/login', async (req, res) => {
   });
   const first = students[0];
   const sessions = await getSessions();
-  const active = sessions.find((s) => s.open) || null;
-  const posting = active ? await db.attendance.byEmp(active.id, empId) : null;
+  const myPostings = await db.attendance.byEmpAll(empId);
+  const postBySession = new Map(myPostings.map((p) => [String(p.sessionId), p]));
+  // one card per session (newest first) with THIS faculty's posting status
+  const sessionCards = sessions.slice().reverse().map((s) => {
+    const p = postBySession.get(String(s.id));
+    return { id: s.id, name: s.name, open: !!s.open, createdAt: s.createdAt, posted: !!p, postedAt: p?.postedAt || null, present: p ? p.present : 0, absent: p ? p.absent : 0, total: students.length, marks: p?.marks || null };
+  });
   res.json({
     faculty: { empId, name: first.facultyName || '', section: first.section || '', room: first.room || '', total: students.length },
     summary: { total: students.length, present, absent, submitted, inProgress },
-    attendance: { session: active ? { id: active.id, name: active.name } : null, open: !!active, posted: !!posting, postedAt: posting?.postedAt || null, marks: posting?.marks || null },
+    sessions: sessionCards,
     students: rows,
   });
 });

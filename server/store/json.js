@@ -151,6 +151,7 @@ export const jsonDb = {
   attendance: {
     bySession: async (sessionId) => read('attendance').filter((p) => String(p.sessionId) === String(sessionId)),
     byEmp: async (sessionId, empId) => read('attendance').find((p) => String(p.sessionId) === String(sessionId) && String(p.empId) === String(empId)) || null,
+    byEmpAll: async (empId) => read('attendance').filter((p) => String(p.empId) === String(empId)),
     set: async (rec) => { const cur = read('attendance').filter((p) => !(String(p.sessionId) === String(rec.sessionId) && String(p.empId) === String(rec.empId))); cur.push(rec); write('attendance', cur); return rec; },
     removeByEmp: async (sessionId, empId) => { const cur = read('attendance'); const keep = cur.filter((p) => !(String(p.sessionId) === String(sessionId) && String(p.empId) === String(empId))); write('attendance', keep); return cur.length - keep.length; },
     removeSession: async (sessionId) => write('attendance', read('attendance').filter((p) => String(p.sessionId) !== String(sessionId))),
