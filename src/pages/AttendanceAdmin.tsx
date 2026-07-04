@@ -112,7 +112,9 @@ export default function AttendanceAdmin() {
                 {cur.open
                   ? <button disabled={busy.startsWith('close')} onClick={() => act(`/api/admin/attendance/sessions/${cur.id}/close`, undefined, `Close "${cur.name}"? Faculty can no longer submit for it. (Its data is kept.)`, 'close', cur.id)} className="rounded-lg bg-red-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-600 disabled:opacity-50">■ Close</button>
                   : <button disabled={busy.startsWith('open')} onClick={() => act(`/api/admin/attendance/sessions/${cur.id}/open`, undefined, `Re-open "${cur.name}" for submissions? Any other open session will be closed.`, 'open', cur.id)} className="rounded-lg bg-green-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-green-600 disabled:opacity-50">● Open</button>}
-                <span className="text-xs text-slate-400">All sessions are kept — nothing is deleted.</span>
+                {s?.posted === 0
+                  ? <button disabled={busy.startsWith('del')} onClick={() => act(`/api/admin/attendance/sessions/${cur.id}/delete`, undefined, `Remove the empty session "${cur.name}"? (No attendance was submitted for it.)`, 'del', '')} className="rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-500 ring-1 ring-slate-300 hover:bg-slate-50 disabled:opacity-50">Remove (empty)</button>
+                  : <span className="text-xs text-slate-400">Has data — kept permanently.</span>}
               </>
             )}
           </>
