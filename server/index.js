@@ -934,8 +934,18 @@ app.get('/api/result/:attemptId', async (req, res) => {
 // Students open https://<this-server>/ and get the exam app; /api/* stays the API.
 const clientDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist');
 if (fs.existsSync(path.join(clientDir, 'index.html'))) {
-  app.use(express.static(clientDir));
-  app.get(/^(?!\/api\/).*/, (_req, res) => res.sendFile(path.join(clientDir, 'index.html')));
+  // Hashed assets (index-<hash>.js/css) can cache forever; index.html must NOT be cached
+  // or a browser keeps loading the OLD bundle after a redeploy (stale-client bug).
+  app.use(express.static(clientDir, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('index.html')) res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      else if (/\.[0-9a-zA-Z_-]{8,}\.(js|css)$/.test(filePath)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    },
+  }));
+  app.get(/^(?!\/api\/).*/, (_req, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.sendFile(path.join(clientDir, 'index.html'));
+  });
   console.log('[client] serving student app from', clientDir);
 }
 
