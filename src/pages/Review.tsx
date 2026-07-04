@@ -40,6 +40,14 @@ export default function Review() {
     for (const row of b.rows) m[row.reg] = { present: row.present, scores: { ...row.scores } };
     setMarks(m); setCrit(0); setSel(b); setMsg('');
   }
+  // batch status from SAVED data: red=pending, yellow=in progress, green=done
+  function batchStatus(b: ReviewBatch): 'red' | 'yellow' | 'green' {
+    const totalC = flat.length;
+    const anyScore = b.submitted || b.rows.some((r) => Object.keys(r.scores || {}).length > 0);
+    if (!anyScore) return 'red';
+    const incomplete = b.rows.some((r) => r.present && Object.keys(r.scores || {}).length < totalC);
+    return incomplete ? 'yellow' : 'green';
+  }
   const total = (reg: string) => Object.values(marks[reg]?.scores || {}).reduce((n, v) => n + (Number(v) || 0), 0);
   const outOf = (reg: string) => Object.keys(marks[reg]?.scores || {}).reduce((n, k) => n + (critMax[k] || 0), 0);
   const pctOf = (reg: string) => { const o = outOf(reg); return o ? Math.round((total(reg) / o) * 100) : 0; };
@@ -52,10 +60,16 @@ export default function Review() {
   async function submit() {
     if (!data?.review || !sel) return;
     const rows = sel.members.map((m) => ({ reg: m.reg, present: !!marks[m.reg]?.present, scores: marks[m.reg]?.scores || {} }));
+    const present = sel.members.filter((m) => marks[m.reg]?.present).length;
+    const absent = sel.members.length - present;
+    const totalC = flat.length;
+    const fullyScored = sel.members.filter((m) => marks[m.reg]?.present && Object.keys(marks[m.reg]?.scores || {}).length >= totalC).length;
+    const batchNo = sel.batchNo;
     setSubmitting(true); setError('');
     try {
       await api.post('/api/faculty/review/submit', { empId: data.faculty.empId, reviewId: data.review.id, batchId: sel.id, rows });
-      setMsg(`✓ Saved marks for Batch ${sel.batchNo}.`);
+      const done = present === fullyScored && absent + present === sel.members.length;
+      setMsg(`✓ Batch ${batchNo} saved — ${present} present (${fullyScored} fully scored), ${absent} marked absent.${done ? ' All members complete ✔' : ' Some criteria still pending.'}`);
       await load(data.faculty.empId);
     } catch (e: any) { setError(e.message); } finally { setSubmitting(false); }
   }
@@ -103,13 +117,28 @@ export default function Review() {
         <div className="grid gap-4 md:grid-cols-[240px_1fr]">
           {/* LEFT: batch list */}
           <div className="space-y-2">
-            <p className="px-1 text-xs font-bold uppercase tracking-wide text-slate-400">Batches ({data.batches.length})</p>
+            <div className="flex items-center justify-between px-1">
+              <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Batches ({data.batches.length})</p>
+              <div className="flex gap-1.5 text-[9px] font-semibold">
+                <span className="flex items-center gap-0.5 text-red-500"><span className="h-2 w-2 rounded-full bg-red-500" />Pending</span>
+                <span className="flex items-center gap-0.5 text-amber-600"><span className="h-2 w-2 rounded-full bg-amber-500" />In prog</span>
+                <span className="flex items-center gap-0.5 text-emerald-600"><span className="h-2 w-2 rounded-full bg-emerald-500" />Done</span>
+              </div>
+            </div>
             {data.batches.map((b) => {
               const active = sel?.id === b.id;
+              const st = batchStatus(b);
+              const cls = active ? 'bg-indigo-600 text-white ring-indigo-600'
+                : st === 'green' ? 'bg-emerald-50 ring-emerald-300 hover:ring-emerald-400'
+                  : st === 'yellow' ? 'bg-amber-50 ring-amber-300 hover:ring-amber-400'
+                    : 'bg-red-50 ring-red-200 hover:ring-red-300';
+              const badge = st === 'green' ? { t: 'Done', c: 'bg-emerald-500' } : st === 'yellow' ? { t: 'In progress', c: 'bg-amber-500' } : { t: 'Pending', c: 'bg-red-500' };
               return (
-                <button key={b.id} onClick={() => openBatch(b)}
-                  className={`w-full rounded-xl p-3 text-left ring-1 transition ${active ? 'bg-indigo-600 text-white ring-indigo-600' : b.submitted ? 'bg-emerald-50 ring-emerald-200 hover:ring-emerald-300' : 'bg-white ring-slate-200 hover:ring-indigo-300'}`}>
-                  <div className="flex items-center justify-between"><span className="font-bold">Batch {b.batchNo || '—'}</span>{b.submitted && <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${active ? 'bg-white/25' : 'bg-emerald-500 text-white'}`}>✓</span>}</div>
+                <button key={b.id} onClick={() => openBatch(b)} className={`w-full rounded-xl p-3 text-left ring-1 transition ${cls}`}>
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold">Batch {b.batchNo || '—'}</span>
+                    <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-bold text-white ${active ? 'bg-white/25' : badge.c}`}>{badge.t}</span>
+                  </div>
                   <p className={`mt-0.5 line-clamp-1 text-xs ${active ? 'text-indigo-100' : 'text-slate-500'}`}>{b.project || '(no title)'}</p>
                   <p className={`text-[11px] ${active ? 'text-indigo-200' : 'text-slate-400'}`}>{b.members.length} members</p>
                 </button>
