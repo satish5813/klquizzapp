@@ -51,7 +51,7 @@ export interface RubricTable { name: string; criteria: RubricCriterion[]; }
 export interface Rubric { bandLabels: string[]; tables: RubricTable[]; }
 export interface ReviewMemberRow { reg: string; name: string; present: boolean; scores: Record<string, number>; total: number; percentage: number | null; grade: string; }
 export interface ReviewBatch { id: string; batchNo: string; project: string; ps: string; members: { reg: string; name: string }[]; submitted: boolean; rows: ReviewMemberRow[]; }
-export interface FacultyReview { faculty: { empId: string; name: string; section: string; room: string; batches: number }; review: { id: string; name: string } | null; rubric: Rubric; maxTotal: number; batches: ReviewBatch[]; }
+export interface FacultyReview { faculty: { empId: string; name: string; section: string; room: string; batches: number }; review: { id: string; name: string } | null; openReviews: { id: string; name: string }[]; rubric: Rubric; maxTotal: number; batches: ReviewBatch[]; }
 export interface AnalyticsAgg { key: string; students: number; scored: number; present: number; absent: number; avg: number; }
 export interface ReviewAnalytics { review: ReviewInfo | null; rubric: Rubric; summary: { review: string; batches: number; students: number; scored: number; present: number; absent: number; avg: number; maxTotal: number }; bySection: AnalyticsAgg[]; byFaculty: AnalyticsAgg[]; students: { section: string; batchNo: string; facultyName: string; reg: string; name: string; present: boolean | null; total: number | null; percentage: number | null; grade: string; scored: boolean }[]; }
 export interface ReviewInfo { id: string; name: string; open: boolean; createdAt: string; }

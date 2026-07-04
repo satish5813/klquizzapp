@@ -849,7 +849,9 @@ app.post('/api/faculty/review', async (req, res) => {
   const students = await db.students.byEmpId(empId);
   if (!batches.length && !students.length) return res.status(404).json({ error: 'No batches or students found for this Employee ID.' });
   const reviews = await getReviews();
-  const active = reviews.find((r) => r.open) || null;
+  const openReviews = reviews.filter((r) => r.open);
+  const wantId = String(req.body?.reviewId || '').trim();
+  const active = openReviews.find((r) => r.id === wantId) || openReviews[0] || null; // pick chosen open review, else first open
   const rubric = await getRubric();
   const scores = active ? await db.reviewScores.byReview(active.id) : [];
   const byBatch = {};
@@ -864,6 +866,7 @@ app.post('/api/faculty/review', async (req, res) => {
   res.json({
     faculty: { empId, name: facultyName, section, room, batches: batches.length },
     review: active ? { id: active.id, name: active.name } : null,
+    openReviews: openReviews.map((r) => ({ id: r.id, name: r.name })),
     rubric, maxTotal,
     batches: batches.map((b) => ({
       id: b.id, batchNo: b.batchNo, project: b.project, ps: b.ps, members: b.members || [],
@@ -938,15 +941,16 @@ app.post('/api/admin/review/rubric', requireAdmin, async (req, res) => {
 app.get('/api/admin/review/reviews', requireAdmin, async (_req, res) => res.json({ reviews: await getReviews() }));
 app.post('/api/admin/review/reviews/create', requireAdmin, async (req, res) => {
   const reviews = await getReviews(); const now = new Date().toISOString();
-  for (const r of reviews) if (r.open) r.open = false;
+  // Multiple reviews may be open at the same time — do NOT close the others.
   const rev = { id: crypto.randomUUID(), name: String(req.body?.name || '').trim() || `Review ${reviews.length + 1}`, open: true, createdAt: now };
   reviews.push(rev); await setReviews(reviews); res.json(rev);
 });
 app.post('/api/admin/review/reviews/:id/open', requireAdmin, async (req, res) => {
-  const reviews = await getReviews(); let f = null;
-  for (const r of reviews) { if (r.id === req.params.id) { r.open = true; f = r; } else r.open = false; }
-  if (!f) return res.status(404).json({ error: 'Review not found' });
-  await setReviews(reviews); res.json(f);
+  const reviews = await getReviews();
+  const r = reviews.find((x) => x.id === req.params.id); // open just this one; leave others as they are
+  if (!r) return res.status(404).json({ error: 'Review not found' });
+  r.open = true;
+  await setReviews(reviews); res.json(r);
 });
 app.post('/api/admin/review/reviews/:id/close', requireAdmin, async (req, res) => {
   const reviews = await getReviews(); const r = reviews.find((x) => x.id === req.params.id);

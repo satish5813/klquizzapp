@@ -14,13 +14,14 @@ export default function Review() {
   const [marks, setMarks] = useState<Marks>({});
   const [crit, setCrit] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  const [reviewId, setReviewId] = useState('');
 
-  async function load(id: string) {
+  async function load(id: string, rid?: string) {
     if (!id.trim()) return;
     setLoading(true); setError('');
     try {
-      const r = await api.post<FacultyReview>('/api/faculty/review', { empId: id.trim() });
-      setData(r); sessionStorage.setItem('kl_emp', id.trim());
+      const r = await api.post<FacultyReview>('/api/faculty/review', { empId: id.trim(), reviewId: rid ?? reviewId });
+      setData(r); setReviewId(r.review?.id || ''); sessionStorage.setItem('kl_emp', id.trim());
       if (sel) { const fresh = r.batches.find((b) => b.id === sel.id); if (fresh) openBatch(fresh); }
     } catch (e: any) { setError(e.message); setData(null); }
     finally { setLoading(false); }
@@ -101,7 +102,13 @@ export default function Review() {
             <p className="text-sm text-indigo-50/90">Emp {f.empId}{f.room ? ` · Room ${f.room}` : ''} · {f.batches} batches</p>
           </div>
           <div className="flex items-center gap-2">
-            <span className={`rounded-full px-3 py-1 text-sm font-semibold ${rev ? 'bg-white/20' : 'bg-white/10 text-indigo-100'}`}>{rev ? `● ${rev.name} — OPEN` : '○ No review open'}</span>
+            {data.openReviews.length > 1 ? (
+              <select value={reviewId} onChange={(e) => { setReviewId(e.target.value); load(f.empId, e.target.value); }} className="rounded-lg bg-white/20 px-3 py-1.5 text-sm font-semibold text-white outline-none [&>option]:text-slate-800">
+                {data.openReviews.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+              </select>
+            ) : (
+              <span className={`rounded-full px-3 py-1 text-sm font-semibold ${rev ? 'bg-white/20' : 'bg-white/10 text-indigo-100'}`}>{rev ? `● ${rev.name} — OPEN` : '○ No review open'}</span>
+            )}
             <button onClick={() => load(f.empId)} className="rounded-lg bg-white/15 px-3 py-1.5 text-sm font-semibold hover:bg-white/25">↻</button>
             <button onClick={logout} className="rounded-lg bg-white/15 px-3 py-1.5 text-sm font-semibold hover:bg-white/25">Logout</button>
           </div>
