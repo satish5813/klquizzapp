@@ -110,9 +110,9 @@ export default function AttendanceAdmin() {
               <>
                 <span className={`rounded-full px-3 py-1 text-sm font-semibold ${cur.open ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}`}>{cur.open ? '● OPEN' : '○ closed'}</span>
                 {cur.open
-                  ? <button disabled={busy.startsWith('close')} onClick={() => act(`/api/admin/attendance/sessions/${cur.id}/close`, undefined, `Close "${cur.name}"? Faculty can no longer submit for it.`, 'close', cur.id)} className="rounded-lg bg-red-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-600 disabled:opacity-50">■ Close</button>
-                  : <button disabled={busy.startsWith('open')} onClick={() => act(`/api/admin/attendance/sessions/${cur.id}/open`, undefined, `Open "${cur.name}" for submissions? Any other open session will be closed.`, 'open', cur.id)} className="rounded-lg bg-green-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-green-600 disabled:opacity-50">● Open</button>}
-                <button disabled={busy.startsWith('del')} onClick={() => act(`/api/admin/attendance/sessions/${cur.id}/delete`, undefined, `Delete "${cur.name}" and all its attendance? Cannot be undone.`, 'del', '')} className="rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-red-600 ring-1 ring-red-200 hover:bg-red-50 disabled:opacity-50">🗑 Delete</button>
+                  ? <button disabled={busy.startsWith('close')} onClick={() => act(`/api/admin/attendance/sessions/${cur.id}/close`, undefined, `Close "${cur.name}"? Faculty can no longer submit for it. (Its data is kept.)`, 'close', cur.id)} className="rounded-lg bg-red-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-600 disabled:opacity-50">■ Close</button>
+                  : <button disabled={busy.startsWith('open')} onClick={() => act(`/api/admin/attendance/sessions/${cur.id}/open`, undefined, `Re-open "${cur.name}" for submissions? Any other open session will be closed.`, 'open', cur.id)} className="rounded-lg bg-green-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-green-600 disabled:opacity-50">● Open</button>}
+                <span className="text-xs text-slate-400">All sessions are kept — nothing is deleted.</span>
               </>
             )}
           </>

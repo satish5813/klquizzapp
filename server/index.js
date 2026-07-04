@@ -734,12 +734,10 @@ app.post('/api/admin/attendance/sessions/:id/close', requireAdmin, async (req, r
   s.open = false; s.closedAt = new Date().toISOString(); await setSessions(sessions); res.json(s);
 });
 
-app.post('/api/admin/attendance/sessions/:id/delete', requireAdmin, async (req, res) => {
-  const sessions = await getSessions(); const keep = sessions.filter((x) => x.id !== req.params.id);
-  if (keep.length === sessions.length) return res.status(404).json({ error: 'Session not found' });
-  await setSessions(keep); await db.attendance.removeSession(req.params.id);
-  res.json({ ok: true });
-});
+// Session deletion is intentionally DISABLED — every session's attendance is kept
+// permanently as a record. (Close a session instead; its data stays viewable.)
+app.post('/api/admin/attendance/sessions/:id/delete', requireAdmin, async (_req, res) =>
+  res.status(403).json({ error: 'Deleting attendance sessions is disabled — all data is kept permanently. Close the session instead.' }));
 
 app.post('/api/admin/attendance/revoke', requireAdmin, async (req, res) => {
   const empId = String(req.body?.empId || '').trim();
