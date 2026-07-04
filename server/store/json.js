@@ -147,12 +147,12 @@ export const jsonDb = {
     all: async () => read('loginEvents'),
   },
 
-  // faculty attendance postings — one per faculty (empId). Cleared between events.
+  // faculty attendance postings — one per (sessionId, empId). Old sessions are kept.
   attendance: {
-    all: async () => read('attendance'),
-    byEmp: async (empId) => read('attendance').find((p) => String(p.empId) === String(empId)) || null,
-    set: async (rec) => { const cur = read('attendance').filter((p) => String(p.empId) !== String(rec.empId)); cur.push(rec); write('attendance', cur); return rec; },
-    removeByEmp: async (empId) => { const cur = read('attendance'); const keep = cur.filter((p) => String(p.empId) !== String(empId)); write('attendance', keep); return cur.length - keep.length; },
-    clear: async () => write('attendance', []),
+    bySession: async (sessionId) => read('attendance').filter((p) => String(p.sessionId) === String(sessionId)),
+    byEmp: async (sessionId, empId) => read('attendance').find((p) => String(p.sessionId) === String(sessionId) && String(p.empId) === String(empId)) || null,
+    set: async (rec) => { const cur = read('attendance').filter((p) => !(String(p.sessionId) === String(rec.sessionId) && String(p.empId) === String(rec.empId))); cur.push(rec); write('attendance', cur); return rec; },
+    removeByEmp: async (sessionId, empId) => { const cur = read('attendance'); const keep = cur.filter((p) => !(String(p.sessionId) === String(sessionId) && String(p.empId) === String(empId))); write('attendance', keep); return cur.length - keep.length; },
+    removeSession: async (sessionId) => write('attendance', read('attendance').filter((p) => String(p.sessionId) !== String(sessionId))),
   },
 };

@@ -672,55 +672,90 @@ app.post('/api/faculty/login', async (req, res) => {
     };
   });
   const first = students[0];
-  const session = await getAttendanceSession();
-  const posting = await db.attendance.byEmp(empId);
+  const sessions = await getSessions();
+  const active = sessions.find((s) => s.open) || null;
+  const posting = active ? await db.attendance.byEmp(active.id, empId) : null;
   res.json({
     faculty: { empId, name: first.facultyName || '', section: first.section || '', room: first.room || '', total: students.length },
     summary: { total: students.length, present, absent, submitted, inProgress },
-    attendance: { open: !!session.open, posted: !!posting, postedAt: posting?.postedAt || null, marks: posting?.marks || null },
+    attendance: { session: active ? { id: active.id, name: active.name } : null, open: !!active, posted: !!posting, postedAt: posting?.postedAt || null, marks: posting?.marks || null },
     students: rows,
   });
 });
 
-/** Faculty SUBMIT attendance for their section — strict: only when open, ONCE (locked). */
+/** Faculty SUBMIT attendance for their section, for the OPEN session — strict: ONCE per session. */
 app.post('/api/faculty/attendance', async (req, res) => {
   const empId = String(req.body?.empId || '').trim();
   const marks = (req.body?.marks && typeof req.body.marks === 'object') ? req.body.marks : null;
   if (!empId || !marks) return res.status(400).json({ error: 'Missing attendance data.' });
-  const session = await getAttendanceSession();
-  if (!session.open) return res.status(403).json({ error: 'Attendance is closed. Please ask the coordinator to open it.' });
-  const existing = await db.attendance.byEmp(empId);
-  if (existing) return res.status(409).json({ error: 'You have already submitted attendance — it is locked. Ask the coordinator to revoke it if a change is needed.', postedAt: existing.postedAt });
+  const sessions = await getSessions();
+  const active = sessions.find((s) => s.open) || null;
+  if (!active) return res.status(403).json({ error: 'No attendance session is open. Please ask the coordinator to start one.' });
+  const existing = await db.attendance.byEmp(active.id, empId);
+  if (existing) return res.status(409).json({ error: `You already submitted attendance for "${active.name}" — it is locked. Ask the coordinator to revoke it if a change is needed.`, postedAt: existing.postedAt });
   const students = await db.students.byEmpId(empId);
   if (!students.length) return res.status(404).json({ error: 'No students for this Employee ID.' });
   const clean = {}; let present = 0;
   for (const s of students) { const p = !!marks[s.registrationNumber]; clean[s.registrationNumber] = p; if (p) present++; }
-  const rec = { empId, section: students[0].section || '', room: students[0].room || '', facultyName: students[0].facultyName || '', present, absent: students.length - present, total: students.length, marks: clean, postedAt: new Date().toISOString() };
+  const rec = { sessionId: active.id, empId, section: students[0].section || '', room: students[0].room || '', facultyName: students[0].facultyName || '', present, absent: students.length - present, total: students.length, marks: clean, postedAt: new Date().toISOString() };
   await db.attendance.set(rec);
-  res.json({ ok: true, postedAt: rec.postedAt, present, absent: rec.absent, total: rec.total });
+  res.json({ ok: true, session: active.name, postedAt: rec.postedAt, present, absent: rec.absent, total: rec.total });
 });
 
-// ============ Attendance admin: open / close / clear / revoke / report ============
-const getAttendanceSession = async () => (await db.settings.get('attendance_session')) || { open: false, openedAt: null, closedAt: null };
-app.post('/api/admin/attendance/open', requireAdmin, async (_req, res) => {
-  const ns = { open: true, openedAt: new Date().toISOString(), closedAt: null };
-  await db.settings.set('attendance_session', ns); res.json(ns);
+// ============ Attendance admin: sessions (create/open/close/delete) + report ============
+// Multiple sessions are kept as history. Only one is "open" for faculty submissions at a time.
+const getSessions = async () => (await db.settings.get('attendance_sessions')) || [];
+const setSessions = async (arr) => db.settings.set('attendance_sessions', arr);
+
+app.get('/api/admin/attendance/sessions', requireAdmin, async (_req, res) => res.json({ sessions: await getSessions() }));
+
+/** Create a NEW session (keeps old ones). It becomes the open one; any other open session is closed. */
+app.post('/api/admin/attendance/sessions/create', requireAdmin, async (req, res) => {
+  const sessions = await getSessions();
+  const now = new Date().toISOString();
+  for (const s of sessions) if (s.open) { s.open = false; s.closedAt = now; }
+  const name = String(req.body?.name || '').trim() || `Session ${sessions.length + 1}`;
+  const sess = { id: crypto.randomUUID(), name, createdAt: now, openedAt: now, closedAt: null, open: true };
+  sessions.push(sess); await setSessions(sessions);
+  res.json(sess);
 });
-app.post('/api/admin/attendance/close', requireAdmin, async (_req, res) => {
-  const s = await getAttendanceSession();
-  const ns = { ...s, open: false, closedAt: new Date().toISOString() };
-  await db.settings.set('attendance_session', ns); res.json(ns);
+
+app.post('/api/admin/attendance/sessions/:id/open', requireAdmin, async (req, res) => {
+  const sessions = await getSessions(); const now = new Date().toISOString();
+  let found = null;
+  for (const s of sessions) { if (s.id === req.params.id) { s.open = true; s.openedAt = now; s.closedAt = null; found = s; } else if (s.open) { s.open = false; s.closedAt = now; } }
+  if (!found) return res.status(404).json({ error: 'Session not found' });
+  await setSessions(sessions); res.json(found);
 });
-app.post('/api/admin/attendance/clear', requireAdmin, async (_req, res) => { await db.attendance.clear(); res.json({ ok: true }); });
+
+app.post('/api/admin/attendance/sessions/:id/close', requireAdmin, async (req, res) => {
+  const sessions = await getSessions(); const s = sessions.find((x) => x.id === req.params.id);
+  if (!s) return res.status(404).json({ error: 'Session not found' });
+  s.open = false; s.closedAt = new Date().toISOString(); await setSessions(sessions); res.json(s);
+});
+
+app.post('/api/admin/attendance/sessions/:id/delete', requireAdmin, async (req, res) => {
+  const sessions = await getSessions(); const keep = sessions.filter((x) => x.id !== req.params.id);
+  if (keep.length === sessions.length) return res.status(404).json({ error: 'Session not found' });
+  await setSessions(keep); await db.attendance.removeSession(req.params.id);
+  res.json({ ok: true });
+});
+
 app.post('/api/admin/attendance/revoke', requireAdmin, async (req, res) => {
   const empId = String(req.body?.empId || '').trim();
-  if (!empId) return res.status(400).json({ error: 'empId required' });
-  const removed = await db.attendance.removeByEmp(empId);
+  const sessionId = String(req.body?.sessionId || '').trim();
+  if (!empId || !sessionId) return res.status(400).json({ error: 'sessionId and empId required' });
+  const removed = await db.attendance.removeByEmp(sessionId, empId);
   res.json({ ok: true, removed });
 });
-/** Overall + section-wise attendance report. */
-app.get('/api/admin/attendance/report', requireAdmin, async (_req, res) => {
-  const [students, postings, session] = await Promise.all([db.students.all(), db.attendance.all(), getAttendanceSession()]);
+
+/** Overall + section-wise report for one session (defaults to the open session, else the latest). */
+app.get('/api/admin/attendance/report', requireAdmin, async (req, res) => {
+  const sessions = await getSessions();
+  let sessionId = String(req.query.sessionId || '').trim();
+  const session = sessions.find((s) => s.id === sessionId) || sessions.find((s) => s.open) || sessions[sessions.length - 1] || null;
+  sessionId = session?.id || '';
+  const [students, postings] = await Promise.all([db.students.all(), sessionId ? db.attendance.bySession(sessionId) : []]);
   const postByEmp = new Map(postings.map((p) => [String(p.empId), p]));
   const facMap = new Map();
   for (const s of students) {
@@ -741,7 +776,7 @@ app.get('/api/admin/attendance/report', requireAdmin, async (_req, res) => {
     present: sections.reduce((n, s) => n + s.present, 0),
     absent: sections.reduce((n, s) => n + (s.posted ? s.absent : 0), 0),
   };
-  res.json({ session, summary, sections });
+  res.json({ sessions, session, summary, sections });
 });
 
 // ============ Student: login → instructions → start ============

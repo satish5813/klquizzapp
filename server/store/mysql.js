@@ -85,13 +85,20 @@ export async function makeMysqlDb() {
       INDEX ix_reg (registration_number), INDEX ix_created (created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
     await q(`CREATE TABLE IF NOT EXISTS attendance_postings (
-      emp_id VARCHAR(32) PRIMARY KEY, section VARCHAR(64), room VARCHAR(32), faculty_name VARCHAR(190),
-      present INT DEFAULT 0, absent INT DEFAULT 0, total INT DEFAULT 0, marks JSON, posted_at VARCHAR(32)
+      session_id VARCHAR(64) NOT NULL DEFAULT '', emp_id VARCHAR(32) NOT NULL,
+      section VARCHAR(64), room VARCHAR(32), faculty_name VARCHAR(190),
+      present INT DEFAULT 0, absent INT DEFAULT 0, total INT DEFAULT 0, marks JSON, posted_at VARCHAR(32),
+      PRIMARY KEY (session_id, emp_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    // migrate a pre-existing single-key (emp_id) table to the session-scoped composite key
+    try { await q("ALTER TABLE attendance_postings ADD COLUMN session_id VARCHAR(64) NOT NULL DEFAULT ''"); }
+    catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+    try { await q('ALTER TABLE attendance_postings DROP PRIMARY KEY, ADD PRIMARY KEY (session_id, emp_id)'); }
+    catch (e) { /* already the composite key */ }
   }
   const toTicket = (r) => ({ id: r.id, registrationNumber: r.registration_number, name: r.name, message: r.message, status: r.status, createdAt: r.created_at });
   const toLogin = (r) => ({ id: r.id, registrationNumber: r.registration_number, name: r.name, ip: r.ip || '', ok: !!r.ok, reason: r.reason || '', createdAt: r.created_at });
-  const toPosting = (r) => ({ empId: r.emp_id, section: r.section || '', room: r.room || '', facultyName: r.faculty_name || '', present: r.present ?? 0, absent: r.absent ?? 0, total: r.total ?? 0, marks: r.marks || {}, postedAt: r.posted_at });
+  const toPosting = (r) => ({ sessionId: r.session_id || '', empId: r.emp_id, section: r.section || '', room: r.room || '', facultyName: r.faculty_name || '', present: r.present ?? 0, absent: r.absent ?? 0, total: r.total ?? 0, marks: r.marks || {}, postedAt: r.posted_at });
 
   const COL = { answers: 'answers', score: 'score', status: 'status', submittedAt: 'submitted_at', reason: 'reason', violations: 'violations', autoSubmitted: 'auto_submitted', durationMin: 'duration_min', ip: 'ip', sessionId: 'session_id', lastSeen: 'last_seen' };
 
@@ -218,18 +225,18 @@ export async function makeMysqlDb() {
     },
 
     attendance: {
-      all: async () => (await q('SELECT * FROM attendance_postings')).map(toPosting),
-      byEmp: async (empId) => { const r = await q('SELECT * FROM attendance_postings WHERE emp_id=?', [String(empId)]); return r[0] ? toPosting(r[0]) : null; },
+      bySession: async (sessionId) => (await q('SELECT * FROM attendance_postings WHERE session_id=?', [String(sessionId)])).map(toPosting),
+      byEmp: async (sessionId, empId) => { const r = await q('SELECT * FROM attendance_postings WHERE session_id=? AND emp_id=?', [String(sessionId), String(empId)]); return r[0] ? toPosting(r[0]) : null; },
       set: async (rec) => {
-        await q(`INSERT INTO attendance_postings (emp_id, section, room, faculty_name, present, absent, total, marks, posted_at)
-                 VALUES (?,?,?,?,?,?,?,?,?)
+        await q(`INSERT INTO attendance_postings (session_id, emp_id, section, room, faculty_name, present, absent, total, marks, posted_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?)
                  ON DUPLICATE KEY UPDATE section=VALUES(section), room=VALUES(room), faculty_name=VALUES(faculty_name),
                  present=VALUES(present), absent=VALUES(absent), total=VALUES(total), marks=VALUES(marks), posted_at=VALUES(posted_at)`,
-          [rec.empId, rec.section, rec.room, rec.facultyName, rec.present, rec.absent, rec.total, J(rec.marks), rec.postedAt]);
+          [rec.sessionId, rec.empId, rec.section, rec.room, rec.facultyName, rec.present, rec.absent, rec.total, J(rec.marks), rec.postedAt]);
         return rec;
       },
-      removeByEmp: async (empId) => { const r = await q('DELETE FROM attendance_postings WHERE emp_id=?', [String(empId)]); return r.affectedRows || 0; },
-      clear: async () => { await q('DELETE FROM attendance_postings'); },
+      removeByEmp: async (sessionId, empId) => { const r = await q('DELETE FROM attendance_postings WHERE session_id=? AND emp_id=?', [String(sessionId), String(empId)]); return r.affectedRows || 0; },
+      removeSession: async (sessionId) => { await q('DELETE FROM attendance_postings WHERE session_id=?', [String(sessionId)]); },
     },
   };
 }

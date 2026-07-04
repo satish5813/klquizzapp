@@ -98,15 +98,15 @@ export default function Faculty() {
       {/* Attendance state banner */}
       {att.posted ? (
         <div className="rounded-xl bg-green-50 px-4 py-3 text-sm font-medium text-green-800 ring-1 ring-green-200">
-          🔒 Attendance already submitted{att.postedAt ? ` at ${new Date(att.postedAt).toLocaleString()}` : ''} — <b>locked</b>. Contact the coordinator to revoke if a change is needed.
+          🔒 Attendance for <b>{att.session?.name}</b> already submitted{att.postedAt ? ` at ${new Date(att.postedAt).toLocaleString()}` : ''} — <b>locked</b>. Contact the coordinator to revoke if a change is needed.
         </div>
       ) : att.open ? (
         <div className="rounded-xl bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800 ring-1 ring-amber-200">
-          ✍ Attendance is <b>OPEN</b>. Everyone starts <b>Absent</b> — tap a student to mark them <b>Present</b>, then submit. <b>You can submit only once</b> — it locks after that.
+          ✍ Session <b>{att.session?.name}</b> is <b>OPEN</b>. Everyone starts <b>Absent</b> — tap a student to mark them <b>Present</b>, then submit. <b>Only once</b> per session — it locks after that.
         </div>
       ) : (
         <div className="rounded-xl bg-slate-100 px-4 py-3 text-sm font-medium text-slate-600 ring-1 ring-slate-200">
-          Attendance is <b>closed</b> right now. Please wait for the coordinator to open it.
+          No attendance session is open right now. Please wait for the coordinator to start one.
         </div>
       )}
       {msg && <div className="rounded-xl bg-teal-50 px-4 py-2.5 text-sm font-semibold text-teal-700">{msg}</div>}
