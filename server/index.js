@@ -807,6 +807,145 @@ app.get('/api/admin/attendance/report', requireAdmin, async (req, res) => {
   res.json({ sessions, session, summary, sections });
 });
 
+// ============ Hackathon Review System ============
+const DEFAULT_RUBRIC = {
+  levels: [2, 4, 6, 8, 10],
+  tables: [
+    { name: 'Review 1', criteria: ['Problem Understanding', 'Design & Approach', 'Implementation', 'Demonstration', 'Individual Contribution'] },
+    { name: 'Review 2', criteria: ['Progress', 'Code Quality', 'Feature Completeness', 'Testing', 'Individual Contribution'] },
+    { name: 'Review 3', criteria: ['Final Implementation', 'Innovation', 'Documentation', 'Presentation', 'Individual Contribution'] },
+  ],
+};
+const getRubric = async () => (await db.settings.get('review_rubric')) || DEFAULT_RUBRIC;
+const getReviews = async () => (await db.settings.get('reviews')) || [];
+const setReviews = async (a) => db.settings.set('reviews', a);
+const scoreTotal = (scores) => Object.values(scores || {}).reduce((n, v) => n + (Number(v) || 0), 0);
+
+// ---- Faculty: see my batches for the open review + submit marks ----
+app.post('/api/faculty/review', async (req, res) => {
+  const empId = String(req.body?.empId || '').trim();
+  if (!empId) return res.status(400).json({ error: 'Enter your Employee ID.' });
+  const batches = await db.reviewBatches.byEmp(empId);
+  const students = await db.students.byEmpId(empId);
+  if (!batches.length && !students.length) return res.status(404).json({ error: 'No batches or students found for this Employee ID.' });
+  const reviews = await getReviews();
+  const active = reviews.find((r) => r.open) || null;
+  const rubric = await getRubric();
+  const scores = active ? await db.reviewScores.byReview(active.id) : [];
+  const byBatch = {};
+  for (const s of scores) (byBatch[s.batchId] = byBatch[s.batchId] || {})[s.reg] = s;
+  const facultyName = batches[0]?.facultyName || students[0]?.facultyName || '';
+  const section = batches[0]?.section || students[0]?.section || '';
+  const room = batches[0]?.room || students[0]?.room || '';
+  res.json({
+    faculty: { empId, name: facultyName, section, room, batches: batches.length },
+    review: active ? { id: active.id, name: active.name } : null,
+    rubric,
+    batches: batches.map((b) => ({
+      id: b.id, batchNo: b.batchNo, project: b.project, ps: b.ps, members: b.members || [],
+      submitted: active ? Object.keys(byBatch[b.id] || {}).length > 0 : false,
+      rows: (b.members || []).map((m) => {
+        const sc = active ? (byBatch[b.id] || {})[m.reg] : null;
+        return { reg: m.reg, name: m.name, present: sc ? sc.present : true, scores: sc ? sc.scores : {}, total: sc ? sc.total : 0 };
+      }),
+    })),
+  });
+});
+
+app.post('/api/faculty/review/submit', async (req, res) => {
+  const empId = String(req.body?.empId || '').trim();
+  const reviewId = String(req.body?.reviewId || '').trim();
+  const batchId = String(req.body?.batchId || '').trim();
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : null;
+  if (!empId || !reviewId || !batchId || !rows) return res.status(400).json({ error: 'Missing data.' });
+  const reviews = await getReviews();
+  const rev = reviews.find((r) => r.id === reviewId);
+  if (!rev || !rev.open) return res.status(403).json({ error: 'This review is not open for submissions.' });
+  const batch = await db.reviewBatches.get(batchId);
+  if (!batch || String(batch.empId) !== empId) return res.status(403).json({ error: 'This batch is not assigned to you.' });
+  const now = new Date().toISOString();
+  const memberRegs = new Set((batch.members || []).map((m) => String(m.reg)));
+  let saved = 0;
+  for (const r of rows) {
+    const reg = String(r.reg || '').trim();
+    if (!memberRegs.has(reg)) continue;
+    const scores = (r.scores && typeof r.scores === 'object') ? r.scores : {};
+    await db.reviewScores.set({ id: crypto.randomUUID(), reviewId, batchId, reg, present: !!r.present, scores, total: scoreTotal(scores), byEmp: empId, postedAt: now });
+    saved++;
+  }
+  res.json({ ok: true, saved, postedAt: now });
+});
+
+// ---- Admin: batches, rubric, reviews, scores ----
+app.get('/api/admin/review/batches', requireAdmin, async (_req, res) => res.json({ batches: await db.reviewBatches.all() }));
+app.post('/api/admin/review/batches/import', requireAdmin, async (req, res) => {
+  const raw = Array.isArray(req.body?.batches) ? req.body.batches : null;
+  if (!raw) return res.status(400).json({ error: 'Body must be { batches: [...] }' });
+  if (req.body?.replace) await db.reviewBatches.clear();
+  let added = 0;
+  for (const b of raw) {
+    await db.reviewBatches.add({ id: crypto.randomUUID(), section: String(b.section || ''), batchNo: String(b.batchNo || ''), empId: String(b.empId || ''), facultyName: String(b.facultyName || ''), room: String(b.room || ''), project: String(b.project || ''), ps: String(b.ps || ''), members: Array.isArray(b.members) ? b.members : [] });
+    added++;
+  }
+  res.json({ ok: true, added, total: (await db.reviewBatches.all()).length });
+});
+app.post('/api/admin/review/batches/:id', requireAdmin, async (req, res) => {
+  const b = await db.reviewBatches.update(req.params.id, req.body || {});
+  if (!b) return res.status(404).json({ error: 'Batch not found' });
+  res.json(b);
+});
+app.post('/api/admin/review/batches/:id/delete', requireAdmin, async (req, res) => { await db.reviewBatches.remove(req.params.id); res.json({ ok: true }); });
+
+app.get('/api/admin/review/rubric', requireAdmin, async (_req, res) => res.json(await getRubric()));
+app.post('/api/admin/review/rubric', requireAdmin, async (req, res) => {
+  const levels = Array.isArray(req.body?.levels) && req.body.levels.length ? req.body.levels.map(Number) : DEFAULT_RUBRIC.levels;
+  const tables = Array.isArray(req.body?.tables) ? req.body.tables.map((t) => ({ name: String(t.name || 'Table'), criteria: (Array.isArray(t.criteria) ? t.criteria : []).map(String).filter(Boolean) })) : DEFAULT_RUBRIC.tables;
+  const rubric = { levels, tables };
+  await db.settings.set('review_rubric', rubric); res.json(rubric);
+});
+
+app.get('/api/admin/review/reviews', requireAdmin, async (_req, res) => res.json({ reviews: await getReviews() }));
+app.post('/api/admin/review/reviews/create', requireAdmin, async (req, res) => {
+  const reviews = await getReviews(); const now = new Date().toISOString();
+  for (const r of reviews) if (r.open) r.open = false;
+  const rev = { id: crypto.randomUUID(), name: String(req.body?.name || '').trim() || `Review ${reviews.length + 1}`, open: true, createdAt: now };
+  reviews.push(rev); await setReviews(reviews); res.json(rev);
+});
+app.post('/api/admin/review/reviews/:id/open', requireAdmin, async (req, res) => {
+  const reviews = await getReviews(); let f = null;
+  for (const r of reviews) { if (r.id === req.params.id) { r.open = true; f = r; } else r.open = false; }
+  if (!f) return res.status(404).json({ error: 'Review not found' });
+  await setReviews(reviews); res.json(f);
+});
+app.post('/api/admin/review/reviews/:id/close', requireAdmin, async (req, res) => {
+  const reviews = await getReviews(); const r = reviews.find((x) => x.id === req.params.id);
+  if (!r) return res.status(404).json({ error: 'Review not found' });
+  r.open = false; await setReviews(reviews); res.json(r);
+});
+app.post('/api/admin/review/reviews/:id/delete', requireAdmin, async (req, res) => {
+  const reviews = await getReviews(); const scores = await db.reviewScores.byReview(req.params.id);
+  if (scores.length) return res.status(403).json({ error: 'This review has submitted marks and cannot be deleted. Close it instead.' });
+  await setReviews(reviews.filter((x) => x.id !== req.params.id)); res.json({ ok: true });
+});
+
+/** Report: all scores for a review, joined with batch/student info. */
+app.get('/api/admin/review/scores', requireAdmin, async (req, res) => {
+  const reviewId = String(req.query.reviewId || '').trim();
+  const reviews = await getReviews();
+  const review = reviews.find((r) => r.id === reviewId) || reviews.find((r) => r.open) || reviews[reviews.length - 1] || null;
+  const batches = await db.reviewBatches.all();
+  const scores = review ? await db.reviewScores.byReview(review.id) : [];
+  const scByBatchReg = new Map(scores.map((s) => [s.batchId + '|' + s.reg, s]));
+  const rows = [];
+  for (const b of batches) {
+    for (const m of (b.members || [])) {
+      const sc = scByBatchReg.get(b.id + '|' + m.reg);
+      rows.push({ section: b.section, batchNo: b.batchNo, empId: b.empId, facultyName: b.facultyName, project: b.project, ps: b.ps, reg: m.reg, name: m.name, present: sc ? sc.present : null, total: sc ? sc.total : null, scored: !!sc });
+    }
+  }
+  res.json({ reviews, review, rubric: await getRubric(), summary: { batches: batches.length, students: rows.length, scored: rows.filter((r) => r.scored).length }, rows });
+});
+
 // ============ Student: login → instructions → start ============
 /** Look up a student by registration number (no password). Returns their details + attempt state. */
 app.post('/api/login', async (req, res) => {

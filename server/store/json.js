@@ -158,4 +158,21 @@ export const jsonDb = {
     removeByEmp: async (sessionId, empId) => { const cur = read('attendance'); const keep = cur.filter((p) => !(String(p.sessionId) === String(sessionId) && String(p.empId) === String(empId))); write('attendance', keep); return cur.length - keep.length; },
     removeSession: async (sessionId) => write('attendance', read('attendance').filter((p) => String(p.sessionId) !== String(sessionId))),
   },
+
+  // ---- Hackathon Review System ----
+  reviewBatches: {
+    all: async () => read('reviewBatches'),
+    byEmp: async (empId) => read('reviewBatches').filter((b) => String(b.empId) === String(empId)).sort((a, b) => String(a.batchNo).localeCompare(String(b.batchNo), undefined, { numeric: true })),
+    get: async (id) => read('reviewBatches').find((b) => b.id === id) || null,
+    add: async (b) => { const cur = read('reviewBatches'); cur.push(b); write('reviewBatches', cur); return b; },
+    update: async (id, p) => { const cur = read('reviewBatches'); const i = cur.findIndex((b) => b.id === id); if (i === -1) return null; cur[i] = { ...cur[i], ...p }; write('reviewBatches', cur); return cur[i]; },
+    remove: async (id) => write('reviewBatches', read('reviewBatches').filter((b) => b.id !== id)),
+    clear: async () => write('reviewBatches', []),
+  },
+  reviewScores: {
+    byReview: async (reviewId) => read('reviewScores').filter((s) => String(s.reviewId) === String(reviewId)),
+    byReviewBatch: async (reviewId, batchId) => read('reviewScores').filter((s) => String(s.reviewId) === String(reviewId) && String(s.batchId) === String(batchId)),
+    set: async (s) => { const cur = read('reviewScores').filter((x) => !(x.reviewId === s.reviewId && x.batchId === s.batchId && x.reg === s.reg)); cur.push(s); write('reviewScores', cur); return s; },
+    removeByBatch: async (reviewId, batchId) => write('reviewScores', read('reviewScores').filter((s) => !(String(s.reviewId) === String(reviewId) && String(s.batchId) === String(batchId)))),
+  },
 };

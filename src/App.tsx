@@ -5,6 +5,8 @@ import Quiz from './pages/Quiz';
 import Result from './pages/Result';
 import Faculty from './pages/Faculty';
 import AttendanceAdmin from './pages/AttendanceAdmin';
+import Review from './pages/Review';
+import ReviewAdmin from './pages/ReviewAdmin';
 
 // Two logos: drop your images at public/logo-left.png and public/logo-right.png.
 // If a file is missing it falls back to a styled badge so the layout never breaks.
@@ -46,6 +48,8 @@ export default function App() {
           <Route path="/result/:attemptId" element={<Result />} />
           <Route path="/faculty" element={<Faculty />} />
           <Route path="/attendance-admin" element={<AttendanceAdmin />} />
+          <Route path="/review" element={<Review />} />
+          <Route path="/review-admin" element={<ReviewAdmin />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

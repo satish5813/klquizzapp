@@ -35,3 +35,13 @@ export interface FacultyResponse { faculty: { empId: string; name: string; secti
 export interface AttSessionInfo { id: string; name: string; createdAt: string; openedAt: string | null; closedAt: string | null; open: boolean; }
 export interface AttSection { empId: string; facultyName: string; section: string; room: string; total: number; posted: boolean; postedAt: string | null; present: number; absent: number; pct: number; }
 export interface AttReport { sessions: AttSessionInfo[]; session: AttSessionInfo | null; summary: { faculties: number; posted: number; notPosted: number; totalStudents: number; present: number; absent: number }; sections: AttSection[]; }
+// ---- Review system ----
+export interface RubricTable { name: string; criteria: string[]; }
+export interface Rubric { levels: number[]; tables: RubricTable[]; }
+export interface ReviewMemberRow { reg: string; name: string; present: boolean; scores: Record<string, number>; total: number; }
+export interface ReviewBatch { id: string; batchNo: string; project: string; ps: string; members: { reg: string; name: string }[]; submitted: boolean; rows: ReviewMemberRow[]; }
+export interface FacultyReview { faculty: { empId: string; name: string; section: string; room: string; batches: number }; review: { id: string; name: string } | null; rubric: Rubric; batches: ReviewBatch[]; }
+export interface ReviewInfo { id: string; name: string; open: boolean; createdAt: string; }
+export interface AdminBatch { id: string; section: string; batchNo: string; empId: string; facultyName: string; room: string; project: string; ps: string; members: { reg: string; name: string }[]; }
+export interface ScoreRow { section: string; batchNo: string; empId: string; facultyName: string; project: string; ps: string; reg: string; name: string; present: boolean | null; total: number | null; scored: boolean; }
+export interface ReviewScores { reviews: ReviewInfo[]; review: ReviewInfo | null; rubric: Rubric; summary: { batches: number; students: number; scored: number }; rows: ScoreRow[]; }

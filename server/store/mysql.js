@@ -90,6 +90,17 @@ export async function makeMysqlDb() {
       present INT DEFAULT 0, absent INT DEFAULT 0, total INT DEFAULT 0, marks JSON, posted_at VARCHAR(32),
       PRIMARY KEY (session_id, emp_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    // ---- Hackathon Review System ----
+    await q(`CREATE TABLE IF NOT EXISTS review_batches (
+      id VARCHAR(64) PRIMARY KEY, section VARCHAR(64), batch_no VARCHAR(32), emp_id VARCHAR(32),
+      faculty_name VARCHAR(190), room VARCHAR(32), project TEXT, ps VARCHAR(64), members JSON,
+      INDEX ix_emp (emp_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS review_scores (
+      id VARCHAR(64) PRIMARY KEY, review_id VARCHAR(64), batch_id VARCHAR(64), reg VARCHAR(64),
+      present TINYINT DEFAULT 1, scores JSON, total INT DEFAULT 0, by_emp VARCHAR(32), posted_at VARCHAR(32),
+      UNIQUE KEY uq_rbr (review_id, batch_id, reg), INDEX ix_review (review_id), INDEX ix_batch (batch_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
     // migrate a pre-existing single-key (emp_id) table to the session-scoped composite key
     try { await q("ALTER TABLE attendance_postings ADD COLUMN session_id VARCHAR(64) NOT NULL DEFAULT ''"); }
     catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
@@ -99,6 +110,8 @@ export async function makeMysqlDb() {
   const toTicket = (r) => ({ id: r.id, registrationNumber: r.registration_number, name: r.name, message: r.message, status: r.status, createdAt: r.created_at });
   const toLogin = (r) => ({ id: r.id, registrationNumber: r.registration_number, name: r.name, ip: r.ip || '', ok: !!r.ok, reason: r.reason || '', createdAt: r.created_at });
   const toPosting = (r) => ({ sessionId: r.session_id || '', empId: r.emp_id, section: r.section || '', room: r.room || '', facultyName: r.faculty_name || '', present: r.present ?? 0, absent: r.absent ?? 0, total: r.total ?? 0, marks: r.marks || {}, postedAt: r.posted_at });
+  const toBatch = (r) => ({ id: r.id, section: r.section || '', batchNo: r.batch_no || '', empId: r.emp_id || '', facultyName: r.faculty_name || '', room: r.room || '', project: r.project || '', ps: r.ps || '', members: r.members || [] });
+  const toScore = (r) => ({ id: r.id, reviewId: r.review_id, batchId: r.batch_id, reg: r.reg, present: !!r.present, scores: r.scores || {}, total: r.total ?? 0, byEmp: r.by_emp || '', postedAt: r.posted_at });
 
   const COL = { answers: 'answers', score: 'score', status: 'status', submittedAt: 'submitted_at', reason: 'reason', violations: 'violations', autoSubmitted: 'auto_submitted', durationMin: 'duration_min', ip: 'ip', sessionId: 'session_id', lastSeen: 'last_seen' };
 
@@ -240,6 +253,35 @@ export async function makeMysqlDb() {
       },
       removeByEmp: async (sessionId, empId) => { const r = await q('DELETE FROM attendance_postings WHERE session_id=? AND emp_id=?', [String(sessionId), String(empId)]); return r.affectedRows || 0; },
       removeSession: async (sessionId) => { await q('DELETE FROM attendance_postings WHERE session_id=?', [String(sessionId)]); },
+    },
+
+    reviewBatches: {
+      all: async () => (await q('SELECT * FROM review_batches')).map(toBatch),
+      byEmp: async (empId) => (await q('SELECT * FROM review_batches WHERE emp_id=? ORDER BY batch_no', [String(empId)])).map(toBatch),
+      get: async (id) => { const r = await q('SELECT * FROM review_batches WHERE id=?', [id]); return r[0] ? toBatch(r[0]) : null; },
+      add: async (b) => { await q('INSERT INTO review_batches (id, section, batch_no, emp_id, faculty_name, room, project, ps, members) VALUES (?,?,?,?,?,?,?,?,?)', [b.id, b.section, b.batchNo, b.empId, b.facultyName, b.room, b.project, b.ps, J(b.members || [])]); return b; },
+      update: async (id, p) => {
+        const map = { section: 'section', batchNo: 'batch_no', empId: 'emp_id', facultyName: 'faculty_name', room: 'room', project: 'project', ps: 'ps', members: 'members' };
+        const sets = [], vals = [];
+        for (const [k, v] of Object.entries(p)) { if (!map[k]) continue; sets.push(`${map[k]}=?`); vals.push(k === 'members' ? J(v) : v); }
+        if (sets.length) { vals.push(id); await q(`UPDATE review_batches SET ${sets.join(', ')} WHERE id=?`, vals); }
+        const r = await q('SELECT * FROM review_batches WHERE id=?', [id]); return r[0] ? toBatch(r[0]) : null;
+      },
+      remove: async (id) => { await q('DELETE FROM review_batches WHERE id=?', [id]); },
+      clear: async () => { await q('DELETE FROM review_batches'); },
+    },
+
+    reviewScores: {
+      byReview: async (reviewId) => (await q('SELECT * FROM review_scores WHERE review_id=?', [String(reviewId)])).map(toScore),
+      byReviewBatch: async (reviewId, batchId) => (await q('SELECT * FROM review_scores WHERE review_id=? AND batch_id=?', [String(reviewId), String(batchId)])).map(toScore),
+      set: async (s) => {
+        await q(`INSERT INTO review_scores (id, review_id, batch_id, reg, present, scores, total, by_emp, posted_at)
+                 VALUES (?,?,?,?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE present=VALUES(present), scores=VALUES(scores), total=VALUES(total), by_emp=VALUES(by_emp), posted_at=VALUES(posted_at)`,
+          [s.id, s.reviewId, s.batchId, s.reg, s.present ? 1 : 0, J(s.scores || {}), s.total || 0, s.byEmp || '', s.postedAt]);
+        return s;
+      },
+      removeByBatch: async (reviewId, batchId) => { await q('DELETE FROM review_scores WHERE review_id=? AND batch_id=?', [String(reviewId), String(batchId)]); },
     },
   };
 }
