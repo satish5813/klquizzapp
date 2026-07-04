@@ -811,10 +811,10 @@ app.get('/api/admin/attendance/report', requireAdmin, async (req, res) => {
 // ============ Hackathon Review System ============
 const DEFAULT_RUBRIC = {
   levels: [2, 4, 6, 8, 10],
+  // 5 UNIQUE criteria (no repeats). The 3 review rounds are separate reviews the
+  // admin creates (Review 1 / 2 / 3), each scored with these same 5 criteria.
   tables: [
-    { name: 'Review 1 — Design', criteria: ['Problem Understanding', 'Solution Design & Architecture', 'Feasibility & Innovation', 'Planning & Team Roles', 'Individual Contribution'] },
-    { name: 'Review 2 — Development', criteria: ['Implementation Progress', 'Code Quality & Structure', 'Core Functionality', 'Testing & Debugging', 'Individual Contribution'] },
-    { name: 'Review 3 — Final', criteria: ['Completeness & Demo', 'Innovation & Impact', 'Documentation', 'Presentation & Communication', 'Individual Contribution'] },
+    { name: 'Hackathon Rubric', criteria: ['Problem Understanding & Relevance', 'Design & Approach', 'Implementation & Functionality', 'Demonstration & Results', 'Individual Contribution & Q&A'] },
   ],
 };
 const getRubric = async () => (await db.settings.get('review_rubric')) || DEFAULT_RUBRIC;
