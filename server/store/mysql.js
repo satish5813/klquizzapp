@@ -228,6 +228,8 @@ export async function makeMysqlDb() {
       bySession: async (sessionId) => (await q('SELECT * FROM attendance_postings WHERE session_id=?', [String(sessionId)])).map(toPosting),
       byEmp: async (sessionId, empId) => { const r = await q('SELECT * FROM attendance_postings WHERE session_id=? AND emp_id=?', [String(sessionId), String(empId)]); return r[0] ? toPosting(r[0]) : null; },
       byEmpAll: async (empId) => (await q('SELECT * FROM attendance_postings WHERE emp_id=?', [String(empId)])).map(toPosting),
+      all: async () => (await q('SELECT * FROM attendance_postings')).map(toPosting),
+      reassign: async (from, to) => { const r = await q('UPDATE attendance_postings SET session_id=? WHERE session_id=?', [String(to), String(from || '')]); return r.affectedRows || 0; },
       set: async (rec) => {
         await q(`INSERT INTO attendance_postings (session_id, emp_id, section, room, faculty_name, present, absent, total, marks, posted_at)
                  VALUES (?,?,?,?,?,?,?,?,?,?)

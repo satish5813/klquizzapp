@@ -52,6 +52,16 @@ export default function AttendanceAdmin() {
     await act('/api/admin/attendance/sessions/create', { name: name.trim() }, undefined, 'new');
   }
 
+  async function recover() {
+    setBusy('recover');
+    try {
+      const r = await api.post<{ recovered: number; faculties: number; sessionId?: string }>('/api/admin/attendance/recover', { name: 'Recovered attendance' }, hdr());
+      if (!r.recovered) window.alert('No old/orphaned attendance found — nothing to recover.');
+      else window.alert(`Recovered ${r.recovered} postings (${r.faculties} faculty) into a "Recovered attendance" session.`);
+      await load(r.sessionId);
+    } catch (e: any) { setError(e.message); } finally { setBusy(''); }
+  }
+
   function selectSession(id: string) { setSelId(id); selRef.current = id; load(id); }
 
   function downloadCsv() {
@@ -91,6 +101,7 @@ export default function AttendanceAdmin() {
           <div className="flex items-center gap-2">
             <label className="flex items-center gap-1.5 text-sm"><input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} /> Auto 10s</label>
             <button onClick={() => load()} className="rounded-lg bg-white/15 px-3 py-1.5 text-sm font-semibold hover:bg-white/25">↻ Refresh</button>
+            <button disabled={busy === 'recover'} onClick={recover} className="rounded-lg bg-white/15 px-3 py-1.5 text-sm font-semibold hover:bg-white/25 disabled:opacity-50">⤴ Recover old</button>
             <button disabled={busy === 'new'} onClick={newSession} className="rounded-lg bg-teal-500 px-3 py-1.5 text-sm font-bold hover:bg-teal-600 disabled:opacity-50">＋ New session</button>
           </div>
         </div>

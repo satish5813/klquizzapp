@@ -759,6 +759,24 @@ app.post('/api/admin/attendance/revoke', requireAdmin, async (req, res) => {
   res.json({ ok: true, removed });
 });
 
+/** Recover orphaned postings — attendance whose session_id no longer matches any session
+ *  (e.g. postings made on the old single-session version, left with an empty session id by
+ *  the multi-session migration). Gathers them into one recovered (closed) session. */
+app.post('/api/admin/attendance/recover', requireAdmin, async (req, res) => {
+  const sessions = await getSessions();
+  const knownIds = new Set(sessions.map((s) => String(s.id)));
+  const all = await db.attendance.all();
+  const orphans = all.filter((p) => !knownIds.has(String(p.sessionId || '')));
+  if (!orphans.length) return res.json({ recovered: 0, faculties: 0, message: 'No orphaned attendance found.' });
+  const now = new Date().toISOString();
+  const name = String(req.body?.name || '').trim() || 'Recovered attendance';
+  const sess = { id: crypto.randomUUID(), name, createdAt: now, openedAt: null, closedAt: now, open: false };
+  sessions.push(sess); await setSessions(sessions);
+  let moved = 0;
+  for (const from of [...new Set(orphans.map((p) => String(p.sessionId || '')))]) moved += await db.attendance.reassign(from, sess.id);
+  res.json({ recovered: moved, faculties: new Set(orphans.map((p) => String(p.empId))).size, session: sess.name, sessionId: sess.id });
+});
+
 /** Overall + section-wise report for one session (defaults to the open session, else the latest). */
 app.get('/api/admin/attendance/report', requireAdmin, async (req, res) => {
   const sessions = await getSessions();
