@@ -46,8 +46,9 @@ export interface AttSessionInfo { id: string; name: string; createdAt: string; o
 export interface AttSection { empId: string; facultyName: string; section: string; room: string; total: number; posted: boolean; postedAt: string | null; present: number; absent: number; pct: number; }
 export interface AttReport { sessions: AttSessionInfo[]; session: AttSessionInfo | null; summary: { faculties: number; posted: number; notPosted: number; totalStudents: number; present: number; absent: number }; sections: AttSection[]; }
 // ---- Review system ----
-export interface RubricTable { name: string; criteria: string[]; }
-export interface Rubric { levels: number[]; tables: RubricTable[]; }
+export interface RubricCriterion { label: string; max: number; bands: string[]; }
+export interface RubricTable { name: string; criteria: RubricCriterion[]; }
+export interface Rubric { bandLabels: string[]; tables: RubricTable[]; }
 export interface ReviewMemberRow { reg: string; name: string; present: boolean; scores: Record<string, number>; total: number; percentage: number | null; grade: string; }
 export interface ReviewBatch { id: string; batchNo: string; project: string; ps: string; members: { reg: string; name: string }[]; submitted: boolean; rows: ReviewMemberRow[]; }
 export interface FacultyReview { faculty: { empId: string; name: string; section: string; room: string; batches: number }; review: { id: string; name: string } | null; rubric: Rubric; maxTotal: number; batches: ReviewBatch[]; }

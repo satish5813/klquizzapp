@@ -809,15 +809,34 @@ app.get('/api/admin/attendance/report', requireAdmin, async (req, res) => {
 });
 
 // ============ Hackathon Review System ============
+const DEFAULT_BANDS = ['0–25% Poor', '26–50% Below Avg', '51–75% Good', '76–100% Excellent'];
 const DEFAULT_RUBRIC = {
-  levels: [2, 4, 6, 8, 10],
-  // 5 UNIQUE criteria (no repeats). The 3 review rounds are separate reviews the
-  // admin creates (Review 1 / 2 / 3), each scored with these same 5 criteria.
-  tables: [
-    { name: 'Hackathon Rubric', criteria: ['Problem Understanding & Relevance', 'Design & Approach', 'Implementation & Functionality', 'Demonstration & Results', 'Individual Contribution & Q&A'] },
-  ],
+  bandLabels: DEFAULT_BANDS,
+  // Each criterion has its OWN max marks (score awarded 0..max), guided by 4 bands.
+  tables: [{
+    name: 'Hackathon Rubric', criteria: [
+      { label: 'Innovativeness of the Idea', max: 20, bands: ['Generic idea, no novelty', 'Slight variation of known solution', 'Creative with some original elements', 'Highly innovative, unique & impactful'] },
+      { label: 'Technical Building Competence', max: 15, bands: ['Non-functional or extremely basic', 'Partial build, major bugs', 'Working with minor issues', 'Clean, robust, well-structured code'] },
+      { label: 'Functionality & Demonstration Capability', max: 20, bands: ['Demo fails, features missing', 'Core features partially working', 'Most features work, minor gaps', 'Fully functional, impressive demo'] },
+      { label: 'Presentation & Clarity', max: 20, bands: ['Unclear, poor communication', 'Basic, lacks confidence', 'Clear with good flow', 'Outstanding delivery, handles Q&A well'] },
+      { label: 'Mock', max: 10, bands: ['Poor Understanding', 'Below average Understanding', 'Sound Understanding', 'Excellent Understanding'] },
+      { label: 'Impact & Feasibility', max: 15, bands: ['Not practical or scalable', 'Limited scope, high barriers', 'Feasible with some planning', 'Clear roadmap, market-ready potential'] },
+    ],
+  }],
 };
-const getRubric = async () => (await db.settings.get('review_rubric')) || DEFAULT_RUBRIC;
+// Normalize: accept old string-criteria rubrics too (wrap into {label,max}).
+function normalizeRubric(r) {
+  return {
+    bandLabels: Array.isArray(r?.bandLabels) && r.bandLabels.length ? r.bandLabels : DEFAULT_BANDS,
+    tables: (r?.tables || []).map((t) => ({
+      name: String(t.name || 'Rubric'),
+      criteria: (t.criteria || []).map((c) => typeof c === 'string'
+        ? { label: c, max: 10, bands: [] }
+        : { label: String(c.label || ''), max: Math.max(1, Number(c.max) || 10), bands: Array.isArray(c.bands) ? c.bands.map(String) : [] }),
+    })),
+  };
+}
+const getRubric = async () => normalizeRubric((await db.settings.get('review_rubric')) || DEFAULT_RUBRIC);
 const getReviews = async () => (await db.settings.get('reviews')) || [];
 const setReviews = async (a) => db.settings.set('reviews', a);
 const scoreTotal = (scores) => Object.values(scores || {}).reduce((n, v) => n + (Number(v) || 0), 0);
@@ -838,22 +857,22 @@ app.post('/api/faculty/review', async (req, res) => {
   const facultyName = batches[0]?.facultyName || students[0]?.facultyName || '';
   const section = batches[0]?.section || students[0]?.section || '';
   const room = batches[0]?.room || students[0]?.room || '';
-  const nCriteria = rubric.tables.reduce((n, t) => n + t.criteria.length, 0);
-  const maxLevel = Math.max(0, ...(rubric.levels.length ? rubric.levels : [0]));
-  const maxTotal = nCriteria * maxLevel;
+  const critMax = {}; // key -> max marks
+  rubric.tables.forEach((t, ti) => t.criteria.forEach((c, ci) => { critMax[`t${ti}_c${ci}`] = c.max; }));
+  const maxTotal = Object.values(critMax).reduce((n, v) => n + v, 0);
   const gradeOf = (pct) => (pct == null ? '' : pct >= 85 ? 'Outstanding' : pct >= 70 ? 'Good' : pct >= 50 ? 'Average' : 'Needs Improvement');
   res.json({
     faculty: { empId, name: facultyName, section, room, batches: batches.length },
     review: active ? { id: active.id, name: active.name } : null,
-    rubric, maxTotal, maxLevel,
+    rubric, maxTotal,
     batches: batches.map((b) => ({
       id: b.id, batchNo: b.batchNo, project: b.project, ps: b.ps, members: b.members || [],
       submitted: active ? Object.keys(byBatch[b.id] || {}).length > 0 : false,
       rows: (b.members || []).map((m) => {
         const sc = active ? (byBatch[b.id] || {})[m.reg] : null;
         const total = sc ? sc.total : 0;
-        const nScored = sc ? Object.keys(sc.scores || {}).length : 0; // % over criteria actually scored
-        const pct = sc && sc.present && nScored ? Math.round((total / (nScored * maxLevel)) * 100) : null;
+        const outOf = sc ? Object.keys(sc.scores || {}).reduce((n, k) => n + (critMax[k] || 0), 0) : 0; // % over criteria scored
+        const pct = sc && sc.present && outOf ? Math.round((total / outOf) * 100) : null;
         return { reg: m.reg, name: m.name, present: sc ? sc.present : true, scores: sc ? sc.scores : {}, total, percentage: pct, grade: gradeOf(pct) };
       }),
     })),
@@ -873,11 +892,16 @@ app.post('/api/faculty/review/submit', async (req, res) => {
   if (!batch || String(batch.empId) !== empId) return res.status(403).json({ error: 'This batch is not assigned to you.' });
   const now = new Date().toISOString();
   const memberRegs = new Set((batch.members || []).map((m) => String(m.reg)));
+  const rubric = await getRubric();
+  const critMax = {};
+  rubric.tables.forEach((t, ti) => t.criteria.forEach((c, ci) => { critMax[`t${ti}_c${ci}`] = c.max; }));
   let saved = 0;
   for (const r of rows) {
     const reg = String(r.reg || '').trim();
     if (!memberRegs.has(reg)) continue;
-    const scores = (r.scores && typeof r.scores === 'object') ? r.scores : {};
+    const raw = (r.scores && typeof r.scores === 'object') ? r.scores : {};
+    const scores = {}; // clamp each awarded mark to [0, criterion max]
+    for (const [k, v] of Object.entries(raw)) { if (critMax[k] == null) continue; const n = Math.round(Number(v)); if (!isNaN(n) && n >= 0) scores[k] = Math.min(n, critMax[k]); }
     await db.reviewScores.set({ id: crypto.randomUUID(), reviewId, batchId, reg, present: !!r.present, scores, total: scoreTotal(scores), byEmp: empId, postedAt: now });
     saved++;
   }
@@ -906,9 +930,8 @@ app.post('/api/admin/review/batches/:id/delete', requireAdmin, async (req, res) 
 
 app.get('/api/admin/review/rubric', requireAdmin, async (_req, res) => res.json(await getRubric()));
 app.post('/api/admin/review/rubric', requireAdmin, async (req, res) => {
-  const levels = Array.isArray(req.body?.levels) && req.body.levels.length ? req.body.levels.map(Number) : DEFAULT_RUBRIC.levels;
-  const tables = Array.isArray(req.body?.tables) ? req.body.tables.map((t) => ({ name: String(t.name || 'Table'), criteria: (Array.isArray(t.criteria) ? t.criteria : []).map(String).filter(Boolean) })) : DEFAULT_RUBRIC.tables;
-  const rubric = { levels, tables };
+  const rubric = normalizeRubric(req.body || {});
+  if (!rubric.tables.length || !rubric.tables.some((t) => t.criteria.length)) return res.status(400).json({ error: 'Provide at least one criterion.' });
   await db.settings.set('review_rubric', rubric); res.json(rubric);
 });
 
@@ -962,17 +985,16 @@ async function buildReviewAnalytics(reviewId) {
   const batches = await db.reviewBatches.all();
   const scores = review ? await db.reviewScores.byReview(review.id) : [];
   const scMap = new Map(scores.map((s) => [s.batchId + '|' + s.reg, s]));
-  const flatCriteria = []; // [{key, table, label}]
-  rubric.tables.forEach((t, ti) => t.criteria.forEach((c, ci) => flatCriteria.push({ key: `t${ti}_c${ci}`, table: t.name, label: c })));
-  const maxLevel = Math.max(0, ...(rubric.levels.length ? rubric.levels : [0]));
+  const flatCriteria = []; // [{key, table, label, max}]
+  rubric.tables.forEach((t, ti) => t.criteria.forEach((c, ci) => flatCriteria.push({ key: `t${ti}_c${ci}`, table: t.name, label: c.label, max: c.max })));
+  const critMax = Object.fromEntries(flatCriteria.map((fc) => [fc.key, fc.max]));
   const students = [];
   for (const b of batches) {
     for (const m of (b.members || [])) {
       const sc = scMap.get(b.id + '|' + m.reg);
       const scoresObj = sc ? sc.scores || {} : {};
       const total = sc ? sc.total : null;
-      const nScored = Object.keys(scoresObj).length;
-      const outOf = nScored * maxLevel; // % over criteria actually scored
+      const outOf = Object.keys(scoresObj).reduce((n, k) => n + (critMax[k] || 0), 0); // % over criteria scored
       const pct = sc && sc.present && outOf ? Math.round((sc.total / outOf) * 100) : null;
       const grade = pct == null ? '' : pct >= 85 ? 'Outstanding' : pct >= 70 ? 'Good' : pct >= 50 ? 'Average' : 'Needs Improvement';
       students.push({
@@ -999,7 +1021,7 @@ async function buildReviewAnalytics(reviewId) {
     review: review?.name || '', batches: batches.length, students: students.length,
     scored: scoredStudents.length, present: scoredStudents.filter((s) => s.present).length, absent: scoredStudents.filter((s) => s.present === false).length,
     avg: scoredStudents.length ? Math.round((scoredStudents.reduce((n, s) => n + (s.total || 0), 0) / scoredStudents.length) * 10) / 10 : 0,
-    maxTotal: flatCriteria.length * maxLevel,
+    maxTotal: flatCriteria.reduce((n, fc) => n + fc.max, 0),
   };
   return { review, rubric, flatCriteria, students, bySection: agg((s) => s.section), byFaculty: agg((s) => s.facultyName || s.empId), summary };
 }

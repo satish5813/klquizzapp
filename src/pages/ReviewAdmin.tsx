@@ -115,33 +115,49 @@ export default function ReviewAdmin() {
         </div>
       )}
 
-      {tab === 'rubric' && rubric && (
-        <div className="space-y-3">
-          <div className="flex items-center gap-2 rounded-xl bg-white p-3 shadow-sm ring-1 ring-slate-200">
-            <span className="text-sm font-semibold text-slate-600">Mark levels:</span>
-            <input value={rubric.levels.join(', ')} onChange={(e) => setRubric({ ...rubric, levels: e.target.value.split(',').map((x) => Number(x.trim())).filter((n) => !isNaN(n)) })} className="flex-1 rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-indigo-500" />
-          </div>
-          {rubric.tables.map((t, ti) => (
-            <div key={ti} className="rounded-xl bg-white p-3 shadow-sm ring-1 ring-slate-200">
-              <div className="mb-2 flex items-center gap-2">
-                <input value={t.name} onChange={(e) => { const tables = [...rubric.tables]; tables[ti] = { ...t, name: e.target.value }; setRubric({ ...rubric, tables }); }} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-bold outline-none focus:border-indigo-500" />
-                <button onClick={() => setRubric({ ...rubric, tables: rubric.tables.filter((_, i) => i !== ti) })} className="ml-auto text-xs font-semibold text-red-600 hover:underline">Remove table</button>
-              </div>
-              {t.criteria.map((c, ci) => (
-                <div key={ci} className="mb-1 flex items-center gap-2">
-                  <input value={c} onChange={(e) => { const tables = [...rubric.tables]; const cr = [...t.criteria]; cr[ci] = e.target.value; tables[ti] = { ...t, criteria: cr }; setRubric({ ...rubric, tables }); }} className="flex-1 rounded-lg border border-slate-300 px-3 py-1 text-sm outline-none focus:border-indigo-500" />
-                  <button onClick={() => { const tables = [...rubric.tables]; tables[ti] = { ...t, criteria: t.criteria.filter((_, i) => i !== ci) }; setRubric({ ...rubric, tables }); }} className="text-xs text-red-500">✕</button>
-                </div>
+      {tab === 'rubric' && rubric && (() => {
+        const setTables = (tables: typeof rubric.tables) => setRubric({ ...rubric, tables });
+        const totalMax = rubric.tables.reduce((n, t) => n + t.criteria.reduce((m, c) => m + (Number(c.max) || 0), 0), 0);
+        return (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2 rounded-xl bg-white p-3 shadow-sm ring-1 ring-slate-200">
+              <span className="text-sm font-semibold text-slate-600">Performance bands:</span>
+              {rubric.bandLabels.map((b, i) => (
+                <input key={i} value={b} onChange={(e) => { const bl = [...rubric.bandLabels]; bl[i] = e.target.value; setRubric({ ...rubric, bandLabels: bl }); }} className="w-36 rounded-lg border border-slate-300 px-2 py-1 text-xs outline-none focus:border-indigo-500" />
               ))}
-              <button onClick={() => { const tables = [...rubric.tables]; tables[ti] = { ...t, criteria: [...t.criteria, 'New criterion'] }; setRubric({ ...rubric, tables }); }} className="mt-1 text-xs font-semibold text-indigo-600 hover:underline">＋ Add criterion</button>
+              <span className="ml-auto rounded-full bg-indigo-100 px-3 py-1 text-xs font-bold text-indigo-700">Total max: {totalMax}</span>
             </div>
-          ))}
-          <div className="flex gap-2">
-            <button onClick={() => setRubric({ ...rubric, tables: [...rubric.tables, { name: `Table ${rubric.tables.length + 1}`, criteria: ['Criterion 1'] }] })} className="rounded-lg bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-200">＋ Add table</button>
-            <button disabled={busy === 'rubric'} onClick={saveRubric} className="rounded-lg bg-indigo-600 px-6 py-2 text-sm font-bold text-white hover:bg-indigo-700 disabled:opacity-50">Save rubric</button>
+            {rubric.tables.map((t, ti) => (
+              <div key={ti} className="rounded-xl bg-white p-3 shadow-sm ring-1 ring-slate-200">
+                <div className="mb-2 flex items-center gap-2">
+                  <input value={t.name} onChange={(e) => { const tables = [...rubric.tables]; tables[ti] = { ...t, name: e.target.value }; setTables(tables); }} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-bold outline-none focus:border-indigo-500" />
+                  {rubric.tables.length > 1 && <button onClick={() => setTables(rubric.tables.filter((_, i) => i !== ti))} className="ml-auto text-xs font-semibold text-red-600 hover:underline">Remove table</button>}
+                </div>
+                {t.criteria.map((c, ci) => (
+                  <div key={ci} className="mb-2 rounded-lg bg-slate-50 p-2">
+                    <div className="flex items-center gap-2">
+                      <input value={c.label} placeholder="Criterion" onChange={(e) => { const tables = [...rubric.tables]; const cr = [...t.criteria]; cr[ci] = { ...c, label: e.target.value }; tables[ti] = { ...t, criteria: cr }; setTables(tables); }} className="flex-1 rounded-lg border border-slate-300 px-3 py-1 text-sm font-medium outline-none focus:border-indigo-500" />
+                      <span className="text-xs text-slate-400">max</span>
+                      <input type="number" min={1} value={c.max} onChange={(e) => { const tables = [...rubric.tables]; const cr = [...t.criteria]; cr[ci] = { ...c, max: Number(e.target.value) || 1 }; tables[ti] = { ...t, criteria: cr }; setTables(tables); }} className="w-16 rounded-lg border border-slate-300 px-2 py-1 text-sm outline-none focus:border-indigo-500" />
+                      <button onClick={() => { const tables = [...rubric.tables]; tables[ti] = { ...t, criteria: t.criteria.filter((_, i) => i !== ci) }; setTables(tables); }} className="text-xs text-red-500">✕</button>
+                    </div>
+                    <div className="mt-1 grid grid-cols-2 gap-1 sm:grid-cols-4">
+                      {[0, 1, 2, 3].map((bi) => (
+                        <input key={bi} value={c.bands[bi] || ''} placeholder={rubric.bandLabels[bi]} onChange={(e) => { const tables = [...rubric.tables]; const cr = [...t.criteria]; const bands = [...(c.bands || [])]; while (bands.length < 4) bands.push(''); bands[bi] = e.target.value; cr[ci] = { ...c, bands }; tables[ti] = { ...t, criteria: cr }; setTables(tables); }} className="rounded border border-slate-200 px-2 py-1 text-[11px] outline-none focus:border-indigo-500" />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                <button onClick={() => { const tables = [...rubric.tables]; tables[ti] = { ...t, criteria: [...t.criteria, { label: 'New criterion', max: 10, bands: ['', '', '', ''] }] }; setTables(tables); }} className="mt-1 text-xs font-semibold text-indigo-600 hover:underline">＋ Add criterion</button>
+              </div>
+            ))}
+            <div className="flex gap-2">
+              <button onClick={() => setTables([...rubric.tables, { name: `Table ${rubric.tables.length + 1}`, criteria: [{ label: 'Criterion 1', max: 10, bands: ['', '', '', ''] }] }])} className="rounded-lg bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-200">＋ Add table</button>
+              <button disabled={busy === 'rubric'} onClick={saveRubric} className="rounded-lg bg-indigo-600 px-6 py-2 text-sm font-bold text-white hover:bg-indigo-700 disabled:opacity-50">Save rubric</button>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {tab === 'scores' && (
         <div className="space-y-3">
