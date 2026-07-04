@@ -257,7 +257,7 @@ export async function makeMysqlDb() {
 
     reviewBatches: {
       all: async () => (await q('SELECT * FROM review_batches')).map(toBatch),
-      byEmp: async (empId) => (await q('SELECT * FROM review_batches WHERE emp_id=? ORDER BY batch_no', [String(empId)])).map(toBatch),
+      byEmp: async (empId) => (await q('SELECT * FROM review_batches WHERE emp_id=? ORDER BY CAST(batch_no AS UNSIGNED), batch_no', [String(empId)])).map(toBatch),
       get: async (id) => { const r = await q('SELECT * FROM review_batches WHERE id=?', [id]); return r[0] ? toBatch(r[0]) : null; },
       add: async (b) => { await q('INSERT INTO review_batches (id, section, batch_no, emp_id, faculty_name, room, project, ps, members) VALUES (?,?,?,?,?,?,?,?,?)', [b.id, b.section, b.batchNo, b.empId, b.facultyName, b.room, b.project, b.ps, J(b.members || [])]); return b; },
       update: async (id, p) => {
