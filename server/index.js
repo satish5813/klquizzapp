@@ -606,6 +606,82 @@ app.get('/api/admin/analysis/domain', requireAdmin, async (req, res) => {
   });
 });
 
+/** Student-wise analysis as a real .xlsx workbook: per-student difficulty + topic breakdown,
+ *  strengths/weaknesses, a long-format Student×Topic sheet, by-domain rollup, and an overall summary. */
+app.get('/api/admin/results/analysis.xlsx', requireAdmin, async (_req, res) => {
+  const students = await db.students.all();
+  const sById = new Map(students.map((s) => [s.id, s]));
+  const { byId } = await getBank();
+  const attempts = (await db.attempts.all()).filter((a) => a.status === 'submitted' || a.status === 'terminated');
+  const pctOf = (c, t) => (t ? Math.round((c / t) * 100) : 0);
+
+  const summaryRows = [];
+  const topicRows = [];
+  const domAgg = new Map(); // domain -> { students, sumPct, passed, topic:Map }
+
+  for (const a of attempts) {
+    const s = sById.get(a.studentId) || {};
+    const diff = { EASY: { c: 0, t: 0 }, MEDIUM: { c: 0, t: 0 }, HARD: { c: 0, t: 0 } };
+    const topicMap = new Map();
+    let correct = 0, wrong = 0, unanswered = 0;
+    for (const qid of a.questionIds) {
+      const q = byId.get(qid); if (!q) continue;
+      const answered = a.answers[qid] !== undefined;
+      const ok = answered && Number(a.answers[qid]) === q.answerIndex;
+      if (!answered) unanswered++; else if (ok) correct++; else wrong++;
+      const d = (q.difficulty || 'MEDIUM').toUpperCase(); if (!diff[d]) diff[d] = { c: 0, t: 0 };
+      diff[d].t++; if (ok) diff[d].c++;
+      const tp = q.topic || 'General'; const tm = topicMap.get(tp) || { c: 0, t: 0 }; tm.t++; if (ok) tm.c++; topicMap.set(tp, tm);
+    }
+    const p = pct(a.score, a.total);
+    const byTopic = [...topicMap].map(([topic, v]) => ({ topic, correct: v.c, total: v.t, pct: pctOf(v.c, v.t) })).sort((x, y) => y.pct - x.pct || y.total - x.total);
+    const strengths = byTopic.filter((t) => t.total >= 1 && t.pct >= 70).slice(0, 5).map((t) => `${t.topic} (${t.pct}%)`).join(', ');
+    const weaknesses = byTopic.filter((t) => t.total >= 1 && t.pct < 50).sort((x, y) => x.pct - y.pct).slice(0, 5).map((t) => `${t.topic} (${t.pct}%)`).join(', ');
+    summaryRows.push({
+      'Reg. No': s.registrationNumber || '', Name: s.name || '', Branch: s.branch || '', Section: s.section || '', Domain: s.domain || '',
+      Score: a.score ?? 0, Total: a.total, '%': p, Result: p >= 75 ? 'PASS' : 'FAIL', Status: a.status,
+      Correct: correct, Wrong: wrong, Unanswered: unanswered,
+      'Easy (c/t)': `${diff.EASY.c}/${diff.EASY.t}`, 'Easy %': pctOf(diff.EASY.c, diff.EASY.t),
+      'Medium (c/t)': `${diff.MEDIUM.c}/${diff.MEDIUM.t}`, 'Medium %': pctOf(diff.MEDIUM.c, diff.MEDIUM.t),
+      'Hard (c/t)': `${diff.HARD.c}/${diff.HARD.t}`, 'Hard %': pctOf(diff.HARD.c, diff.HARD.t),
+      Strengths: strengths, 'Needs work': weaknesses,
+      'Auto-submitted': a.autoSubmitted ? 'yes' : 'no', Warnings: a.violations ?? 0, IP: a.ip || '',
+      Submitted: a.submittedAt ? new Date(a.submittedAt).toLocaleString() : '',
+    });
+    for (const t of byTopic) topicRows.push({ 'Reg. No': s.registrationNumber || '', Name: s.name || '', Domain: s.domain || '', Topic: t.topic, Correct: t.correct, Total: t.total, '%': t.pct });
+
+    const dk = s.domain || '(none)';
+    let da = domAgg.get(dk);
+    if (!da) { da = { students: 0, sumPct: 0, passed: 0, topic: new Map() }; domAgg.set(dk, da); }
+    da.students++; da.sumPct += p; if (p >= 75) da.passed++;
+    for (const [tp, v] of topicMap) { const tv = da.topic.get(tp) || { c: 0, t: 0 }; tv.c += v.c; tv.t += v.t; da.topic.set(tp, tv); }
+  }
+  summaryRows.sort((x, y) => y['%'] - x['%']);
+  topicRows.sort((x, y) => String(x['Reg. No']).localeCompare(String(y['Reg. No'])) || y['%'] - x['%']);
+
+  const domainRows = [...domAgg].map(([domain, da]) => {
+    const topics = [...da.topic].map(([topic, v]) => ({ topic, pct: pctOf(v.c, v.t), total: v.t }));
+    const weakest = topics.filter((t) => t.total >= 3).sort((x, y) => x.pct - y.pct).slice(0, 5).map((t) => `${t.topic} (${t.pct}%)`).join(', ');
+    return { Domain: domain, Students: da.students, 'Avg %': da.students ? Math.round(da.sumPct / da.students) : 0, Passed: da.passed, Failed: da.students - da.passed, 'Pass %': da.students ? Math.round((da.passed / da.students) * 100) : 0, 'Weakest topics': weakest };
+  }).sort((x, y) => y.Students - x.Students);
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows.length ? summaryRows : [{ Note: 'No submitted attempts yet' }]), 'Student Analysis');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(topicRows.length ? topicRows : [{ Note: 'No data' }]), 'Student x Topic');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(domainRows.length ? domainRows : [{ Note: 'No data' }]), 'By Domain');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+    { Metric: 'Submitted attempts', Value: attempts.length },
+    { Metric: 'Students on roster', Value: students.length },
+    { Metric: 'Passed (>= 75%)', Value: summaryRows.filter((r) => r.Result === 'PASS').length },
+    { Metric: 'Failed', Value: summaryRows.filter((r) => r.Result === 'FAIL').length },
+    { Metric: 'Average %', Value: summaryRows.length ? Math.round(summaryRows.reduce((n, r) => n + r['%'], 0) / summaryRows.length) : 0 },
+  ]), 'Summary');
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  res.setHeader('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('content-disposition', 'attachment; filename="kl-ai-quiz-student-analysis.xlsx"');
+  res.send(buf);
+});
+
 app.get('/api/admin/report/questions', requireAdmin, async (_req, res) => {
   const subs = (await db.attempts.all()).filter((a) => a.status === 'submitted');
   const byId = new Map((await db.questions.all()).map((q) => [q.id, q]));
