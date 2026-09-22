@@ -213,12 +213,40 @@ export const jsonDb = {
       let added = 0, updated = 0;
       for (const r of rows) {
         const ex = idx.get(r.reg);
-        if (ex) { Object.assign(ex, { ...r, id: ex.id, programId: pid }); updated++; }
+        // a re-upload without a Batch column keeps the batches already assigned
+        if (ex) { Object.assign(ex, { ...r, id: ex.id, programId: pid, batchNo: r.batchNo || ex.batchNo || '', reviewer: ex.reviewer || '' }); updated++; }
         else { const n = { ...r, programId: pid }; cur.push(n); idx.set(r.reg, n); added++; }
       }
       write('programStudents', cur);
       return { added, updated, total: cur.filter((s) => s.programId === pid).length };
     },
+    setBatches: async (pid, rows) => {
+      const cur = read('programStudents'); const m = new Map(rows.map((r) => [r.id, r]));
+      for (const s of cur) { const u = m.get(s.id); if (u && s.programId === pid) { s.batchNo = u.batchNo; s.reviewer = u.reviewer; } }
+      write('programStudents', cur);
+    },
+  },
+  facultyDir: {
+    all: async () => read('facultyDir'),
+    get: async (fkey) => read('facultyDir').find((f) => f.key === fkey) || null,
+    byEmail: async (email) => read('facultyDir').find((f) => String(f.email || '').toLowerCase() === String(email).toLowerCase()) || null,
+    byEmp: async (empId) => read('facultyDir').find((f) => String(f.empId || '') === String(empId)) || null,
+    upsert: async (f) => {
+      const cur = read('facultyDir'); const ex = cur.find((x) => x.key === f.key);
+      if (ex) { for (const k of ['name', 'email', 'empId']) if (f[k]) ex[k] = f[k]; ex.updatedAt = new Date().toISOString(); }
+      else cur.push({ key: f.key, name: f.name || '', email: f.email || '', empId: f.empId || '', updatedAt: new Date().toISOString() });
+      write('facultyDir', cur);
+    },
+  },
+  facultyAuth: {
+    add: async (a) => { const cur = read('facultyAuth'); cur.push(a); write('facultyAuth', cur); return a; },
+    latest: async (fkey, kind) => read('facultyAuth').filter((a) => a.fkey === fkey && a.kind === kind).sort((x, y) => String(y.createdAt).localeCompare(String(x.createdAt)))[0] || null,
+    countSince: async (fkey, kind, since) => read('facultyAuth').filter((a) => a.fkey === fkey && a.kind === kind && a.createdAt >= since).length,
+    byHash: async (hash, kind) => read('facultyAuth').find((a) => a.secretHash === hash && a.kind === kind) || null,
+    bumpAttempts: async (id) => { const cur = read('facultyAuth'); const a = cur.find((x) => x.id === id); if (a) a.attempts = (a.attempts || 0) + 1; write('facultyAuth', cur); },
+    remove: async (id) => write('facultyAuth', read('facultyAuth').filter((a) => a.id !== id)),
+    removeKind: async (fkey, kind) => write('facultyAuth', read('facultyAuth').filter((a) => !(a.fkey === fkey && a.kind === kind))),
+    purgeExpired: async (nowIso) => write('facultyAuth', read('facultyAuth').filter((a) => !(a.expiresAt && a.expiresAt < nowIso))),
   },
   programSessions: {
     byProgram: async (pid) => read('programSessions').filter((s) => s.programId === pid).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))),
