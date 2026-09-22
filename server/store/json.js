@@ -30,6 +30,12 @@ export const jsonDb = {
     addMany: async (items) => { const cur = read('questions'); cur.push(...items); write('questions', cur); return cur.length; },
     clear: async () => write('questions', []),
     get: async (id) => read('questions').find((q) => q.id === id) || null,
+    remove: async (id) => {
+      const cur = read('questions');
+      const keep = cur.filter((q) => q.id !== id);
+      write('questions', keep);
+      return cur.length - keep.length; // 1 if removed, 0 if not found
+    },
     update: async (id, patch) => {
       const cur = read('questions');
       const i = cur.findIndex((q) => q.id === id);
@@ -87,6 +93,16 @@ export const jsonDb = {
       write('students', studs.filter((s) => !goneIds.has(s.id)));
       write('attempts', read('attempts').filter((a) => !goneIds.has(a.studentId)));
       return goneIds.size;
+    },
+    // Delete specific students by id (and any attempts they own).
+    removeMany: async (ids) => {
+      const gone = new Set(ids);
+      if (!gone.size) return 0;
+      const studs = read('students');
+      const keep = studs.filter((s) => !gone.has(s.id));
+      write('students', keep);
+      write('attempts', read('attempts').filter((a) => !gone.has(a.studentId)));
+      return studs.length - keep.length;
     },
     // Upsert a roster by registrationNumber. New rows default to active.
     importMany: async (rows) => {
@@ -174,5 +190,54 @@ export const jsonDb = {
     byReviewBatch: async (reviewId, batchId) => read('reviewScores').filter((s) => String(s.reviewId) === String(reviewId) && String(s.batchId) === String(batchId)),
     set: async (s) => { const cur = read('reviewScores').filter((x) => !(x.reviewId === s.reviewId && x.batchId === s.batchId && x.reg === s.reg)); cur.push(s); write('reviewScores', cur); return s; },
     removeByBatch: async (reviewId, batchId) => write('reviewScores', read('reviewScores').filter((s) => !(String(s.reviewId) === String(reviewId) && String(s.batchId) === String(batchId)))),
+  },
+
+  // ---- Programs ----
+  programs: {
+    all: async () => read('programs').slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+    get: async (id) => read('programs').find((p) => p.id === id) || null,
+    add: async (p) => { const cur = read('programs'); cur.push(p); write('programs', cur); return p; },
+    update: async (id, patch) => { const cur = read('programs'); const i = cur.findIndex((p) => p.id === id); if (i === -1) return null; if (typeof patch.title === 'string') cur[i].title = patch.title; write('programs', cur); return cur[i]; },
+    remove: async (id) => {
+      for (const f of ['programScores', 'programAttendance', 'programSessions', 'programStudents']) write(f, read(f).filter((x) => x.programId !== id));
+      write('programs', read('programs').filter((p) => p.id !== id));
+    },
+  },
+  programStudents: {
+    byProgram: async (pid) => read('programStudents').filter((s) => s.programId === pid),
+    byEmp: async (empId) => read('programStudents').filter((s) => String(s.empId) === String(empId)),
+    importMany: async (pid, rows, replace) => {
+      let cur = read('programStudents');
+      if (replace) cur = cur.filter((s) => s.programId !== pid);
+      const idx = new Map(cur.filter((s) => s.programId === pid).map((s) => [s.reg, s]));
+      let added = 0, updated = 0;
+      for (const r of rows) {
+        const ex = idx.get(r.reg);
+        if (ex) { Object.assign(ex, { ...r, id: ex.id, programId: pid }); updated++; }
+        else { const n = { ...r, programId: pid }; cur.push(n); idx.set(r.reg, n); added++; }
+      }
+      write('programStudents', cur);
+      return { added, updated, total: cur.filter((s) => s.programId === pid).length };
+    },
+  },
+  programSessions: {
+    byProgram: async (pid) => read('programSessions').filter((s) => s.programId === pid).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))),
+    get: async (id) => read('programSessions').find((s) => s.id === id) || null,
+    add: async (s) => { const cur = read('programSessions'); cur.push(s); write('programSessions', cur); return s; },
+    update: async (id, p) => { const cur = read('programSessions'); const i = cur.findIndex((s) => s.id === id); if (i === -1) return null; cur[i] = { ...cur[i], ...p }; write('programSessions', cur); return cur[i]; },
+    remove: async (id) => write('programSessions', read('programSessions').filter((s) => s.id !== id)),
+  },
+  programAttendance: {
+    bySession: async (sid) => read('programAttendance').filter((a) => a.sessionId === sid),
+    byProgram: async (pid) => read('programAttendance').filter((a) => a.programId === pid),
+    get: async (sid, room) => read('programAttendance').find((a) => a.sessionId === sid && a.room === room) || null,
+    set: async (a) => { const cur = read('programAttendance').filter((x) => !(x.sessionId === a.sessionId && x.room === a.room)); cur.push(a); write('programAttendance', cur); return a; },
+    remove: async (sid, room) => { const cur = read('programAttendance'); const keep = cur.filter((a) => !(a.sessionId === sid && a.room === room)); write('programAttendance', keep); return cur.length - keep.length; },
+  },
+  programScores: {
+    bySession: async (sid) => read('programScores').filter((s) => s.sessionId === sid),
+    byProgram: async (pid) => read('programScores').filter((s) => s.programId === pid),
+    set: async (s) => { const cur = read('programScores').filter((x) => !(x.sessionId === s.sessionId && x.reg === s.reg)); cur.push(s); write('programScores', cur); return s; },
+    removeRoom: async (sid, room) => { const cur = read('programScores'); const keep = cur.filter((s) => !(s.sessionId === sid && s.room === room)); write('programScores', keep); return cur.length - keep.length; },
   },
 };

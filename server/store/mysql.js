@@ -7,7 +7,7 @@ const J = (v) => JSON.stringify(v ?? null);
 // row mappers: DB snake_case <-> app camelCase
 const toQuestion = (r) => ({ id: r.id, question: r.question, options: r.options, answerIndex: r.answer_index, topic: r.topic, difficulty: r.difficulty, explanation: r.explanation, domain: r.domain || '', norm: r.norm });
 const toStudent = (r) => ({ id: r.id, registrationNumber: r.registration_number, name: r.name, branch: r.branch, section: r.section, domain: r.domain || '', empId: r.emp_id || '', room: r.room || '', facultyName: r.faculty_name || '', active: r.active === undefined ? true : !!r.active, createdAt: r.created_at });
-const toAttempt = (r) => ({ id: r.id, studentId: r.student_id, questionIds: r.question_ids, answers: r.answers, score: r.score, total: r.total, status: r.status, reason: r.reason, violations: r.violations ?? 0, autoSubmitted: !!r.auto_submitted, durationMin: r.duration_min || null, ip: r.ip || '', sessionId: r.session_id || '', lastSeen: r.last_seen || null, startedAt: r.started_at, submittedAt: r.submitted_at });
+const toAttempt = (r) => ({ id: r.id, studentId: r.student_id, questionIds: r.question_ids, answers: r.answers, score: r.score, total: r.total, status: r.status, reason: r.reason, violations: r.violations ?? 0, autoSubmitted: !!r.auto_submitted, durationMin: r.duration_min || null, ip: r.ip || '', sessionId: r.session_id || '', lastSeen: r.last_seen || null, startedAt: r.started_at, submittedAt: r.submitted_at, domain: r.domain || '', round: r.round_no || 1 });
 
 export async function makeMysqlDb() {
   const pool = mysql.createPool({
@@ -70,6 +70,9 @@ export async function makeMysqlDb() {
       'ALTER TABLE attempts ADD COLUMN auto_submitted TINYINT NOT NULL DEFAULT 0',
       'ALTER TABLE attempts ADD COLUMN duration_min INT NULL',
       "ALTER TABLE attempts ADD COLUMN ip VARCHAR(64) DEFAULT ''",
+      // An attempt belongs to ONE exam = (domain, round) so a student can sit many exams over time.
+      "ALTER TABLE attempts ADD COLUMN domain VARCHAR(64) DEFAULT ''",
+      'ALTER TABLE attempts ADD COLUMN round_no INT NOT NULL DEFAULT 1',
     ]) { try { await q(alter); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; } }
     await q(`CREATE TABLE IF NOT EXISTS settings (
       k VARCHAR(64) PRIMARY KEY, v JSON
@@ -101,6 +104,32 @@ export async function makeMysqlDb() {
       present TINYINT DEFAULT 1, scores JSON, total INT DEFAULT 0, by_emp VARCHAR(32), posted_at VARCHAR(32),
       UNIQUE KEY uq_rbr (review_id, batch_id, reg), INDEX ix_review (review_id), INDEX ix_batch (batch_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    // ---- Programs: titled events with their own roster, sessions and room-wise attendance/review ----
+    await q(`CREATE TABLE IF NOT EXISTS programs (
+      id VARCHAR(64) PRIMARY KEY, title VARCHAR(255) NOT NULL, created_at VARCHAR(32)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS program_students (
+      id VARCHAR(64) PRIMARY KEY, program_id VARCHAR(64) NOT NULL, reg VARCHAR(64) NOT NULL, name VARCHAR(190),
+      branch VARCHAR(64), section VARCHAR(64), room VARCHAR(64), emp_id VARCHAR(32), faculty_name VARCHAR(190),
+      batch_no VARCHAR(32), project TEXT, ps VARCHAR(64),
+      UNIQUE KEY uq_prog_reg (program_id, reg), INDEX ix_prog (program_id), INDEX ix_emp (emp_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS program_sessions (
+      id VARCHAR(64) PRIMARY KEY, program_id VARCHAR(64) NOT NULL, kind VARCHAR(16) NOT NULL, name VARCHAR(190),
+      session_date VARCHAR(16), start_time VARCHAR(8), end_time VARCHAR(8), open_rooms JSON, created_at VARCHAR(32),
+      INDEX ix_prog (program_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS program_attendance (
+      session_id VARCHAR(64) NOT NULL, room VARCHAR(64) NOT NULL, program_id VARCHAR(64), room_label VARCHAR(64),
+      emp_id VARCHAR(32), faculty_name VARCHAR(190), marks JSON, present INT DEFAULT 0, absent INT DEFAULT 0,
+      total INT DEFAULT 0, posted_at VARCHAR(32),
+      PRIMARY KEY (session_id, room), INDEX ix_prog (program_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS program_scores (
+      session_id VARCHAR(64) NOT NULL, reg VARCHAR(64) NOT NULL, program_id VARCHAR(64), room VARCHAR(64),
+      present TINYINT DEFAULT 1, scores JSON, total INT DEFAULT 0, by_emp VARCHAR(32), posted_at VARCHAR(32),
+      PRIMARY KEY (session_id, reg), INDEX ix_prog (program_id), INDEX ix_room (session_id, room)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
     // migrate a pre-existing single-key (emp_id) table to the session-scoped composite key
     try { await q("ALTER TABLE attendance_postings ADD COLUMN session_id VARCHAR(64) NOT NULL DEFAULT ''"); }
     catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
@@ -112,8 +141,13 @@ export async function makeMysqlDb() {
   const toPosting = (r) => ({ sessionId: r.session_id || '', empId: r.emp_id, section: r.section || '', room: r.room || '', facultyName: r.faculty_name || '', present: r.present ?? 0, absent: r.absent ?? 0, total: r.total ?? 0, marks: r.marks || {}, postedAt: r.posted_at });
   const toBatch = (r) => ({ id: r.id, section: r.section || '', batchNo: r.batch_no || '', empId: r.emp_id || '', facultyName: r.faculty_name || '', room: r.room || '', project: r.project || '', ps: r.ps || '', members: r.members || [] });
   const toScore = (r) => ({ id: r.id, reviewId: r.review_id, batchId: r.batch_id, reg: r.reg, present: !!r.present, scores: r.scores || {}, total: r.total ?? 0, byEmp: r.by_emp || '', postedAt: r.posted_at });
+  const toProgram = (r) => ({ id: r.id, title: r.title, createdAt: r.created_at });
+  const toPStudent = (r) => ({ id: r.id, programId: r.program_id, reg: r.reg, name: r.name || '', branch: r.branch || '', section: r.section || '', room: r.room || '', empId: r.emp_id || '', facultyName: r.faculty_name || '', batchNo: r.batch_no || '', project: r.project || '', ps: r.ps || '' });
+  const toPSession = (r) => ({ id: r.id, programId: r.program_id, kind: r.kind, name: r.name || '', date: r.session_date || '', startTime: r.start_time || '', endTime: r.end_time || '', openRooms: Array.isArray(r.open_rooms) ? r.open_rooms : [], createdAt: r.created_at });
+  const toPAtt = (r) => ({ sessionId: r.session_id, room: r.room, programId: r.program_id, roomLabel: r.room_label || '', empId: r.emp_id || '', facultyName: r.faculty_name || '', marks: r.marks || {}, present: r.present ?? 0, absent: r.absent ?? 0, total: r.total ?? 0, postedAt: r.posted_at });
+  const toPScore = (r) => ({ sessionId: r.session_id, reg: r.reg, programId: r.program_id, room: r.room || '', present: !!r.present, scores: r.scores || {}, total: r.total ?? 0, byEmp: r.by_emp || '', postedAt: r.posted_at });
 
-  const COL = { answers: 'answers', score: 'score', status: 'status', submittedAt: 'submitted_at', reason: 'reason', violations: 'violations', autoSubmitted: 'auto_submitted', durationMin: 'duration_min', ip: 'ip', sessionId: 'session_id', lastSeen: 'last_seen' };
+  const COL = { answers: 'answers', score: 'score', status: 'status', submittedAt: 'submitted_at', reason: 'reason', violations: 'violations', autoSubmitted: 'auto_submitted', durationMin: 'duration_min', ip: 'ip', sessionId: 'session_id', lastSeen: 'last_seen', domain: 'domain', round: 'round_no' };
 
   return {
     driver: 'mysql',
@@ -131,6 +165,7 @@ export async function makeMysqlDb() {
       },
       clear: async () => { await q('DELETE FROM questions'); },
       get: async (id) => { const r = await q('SELECT * FROM questions WHERE id=?', [id]); return r[0] ? toQuestion(r[0]) : null; },
+      remove: async (id) => { const r = await q('DELETE FROM questions WHERE id=?', [id]); return r.affectedRows || 0; },
       update: async (id, patch) => {
         const map = { question: 'question', options: 'options', answerIndex: 'answer_index', topic: 'topic', difficulty: 'difficulty', explanation: 'explanation', domain: 'domain' };
         const sets = [], vals = [];
@@ -184,6 +219,18 @@ export async function makeMysqlDb() {
         const r = await q('DELETE FROM students WHERE domain = ?', [domain]);
         return r.affectedRows || 0;
       },
+      // Delete specific students by id (and any attempts they own), in safe chunks.
+      removeMany: async (ids) => {
+        let n = 0;
+        for (let i = 0; i < ids.length; i += 500) {
+          const chunk = ids.slice(i, i + 500);
+          if (!chunk.length) continue;
+          await q('DELETE FROM attempts WHERE student_id IN (?)', [chunk]);
+          const r = await q('DELETE FROM students WHERE id IN (?)', [chunk]);
+          n += r.affectedRows || 0;
+        }
+        return n;
+      },
       importMany: async (rows) => {
         if (!rows.length) return { added: 0, updated: 0, total: (await q('SELECT COUNT(*) n FROM students'))[0].n };
         const regs = rows.map((r) => r.registrationNumber);
@@ -200,8 +247,8 @@ export async function makeMysqlDb() {
       all: async () => (await q('SELECT * FROM attempts')).map(toAttempt),
       get: async (id) => { const r = await q('SELECT * FROM attempts WHERE id=?', [id]); return r[0] ? toAttempt(r[0]) : null; },
       add: async (a) => {
-        await q('INSERT INTO attempts (id, student_id, question_ids, answers, score, total, status, reason, violations, auto_submitted, duration_min, ip, session_id, last_seen, started_at, submitted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-          [a.id, a.studentId, J(a.questionIds), J(a.answers), a.score, a.total, a.status, a.reason, a.violations || 0, a.autoSubmitted ? 1 : 0, a.durationMin || null, a.ip || '', a.sessionId || '', a.lastSeen || null, a.startedAt, a.submittedAt]);
+        await q('INSERT INTO attempts (id, student_id, question_ids, answers, score, total, status, reason, violations, auto_submitted, duration_min, ip, session_id, last_seen, started_at, submitted_at, domain, round_no) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          [a.id, a.studentId, J(a.questionIds), J(a.answers), a.score, a.total, a.status, a.reason, a.violations || 0, a.autoSubmitted ? 1 : 0, a.durationMin || null, a.ip || '', a.sessionId || '', a.lastSeen || null, a.startedAt, a.submittedAt, a.domain || '', Number(a.round) || 1]);
         return a;
       },
       update: async (id, patch) => {
@@ -282,6 +329,80 @@ export async function makeMysqlDb() {
         return s;
       },
       removeByBatch: async (reviewId, batchId) => { await q('DELETE FROM review_scores WHERE review_id=? AND batch_id=?', [String(reviewId), String(batchId)]); },
+    },
+
+    // ---- Programs ----
+    programs: {
+      all: async () => (await q('SELECT * FROM programs ORDER BY created_at DESC')).map(toProgram),
+      get: async (id) => { const r = await q('SELECT * FROM programs WHERE id=?', [id]); return r[0] ? toProgram(r[0]) : null; },
+      add: async (p) => { await q('INSERT INTO programs (id, title, created_at) VALUES (?,?,?)', [p.id, p.title, p.createdAt]); return p; },
+      update: async (id, patch) => { if (typeof patch.title === 'string') await q('UPDATE programs SET title=? WHERE id=?', [patch.title, id]); const r = await q('SELECT * FROM programs WHERE id=?', [id]); return r[0] ? toProgram(r[0]) : null; },
+      remove: async (id) => {
+        await q('DELETE FROM program_scores WHERE program_id=?', [id]);
+        await q('DELETE FROM program_attendance WHERE program_id=?', [id]);
+        await q('DELETE FROM program_sessions WHERE program_id=?', [id]);
+        await q('DELETE FROM program_students WHERE program_id=?', [id]);
+        await q('DELETE FROM programs WHERE id=?', [id]);
+      },
+    },
+    programStudents: {
+      byProgram: async (pid) => (await q('SELECT * FROM program_students WHERE program_id=? ORDER BY room, reg', [pid])).map(toPStudent),
+      byEmp: async (empId) => (await q('SELECT * FROM program_students WHERE emp_id=?', [String(empId)])).map(toPStudent),
+      // Upsert by (program, reg). Returns counts for the admin message.
+      importMany: async (pid, rows, replace) => {
+        if (replace) await q('DELETE FROM program_students WHERE program_id=?', [pid]);
+        let added = 0, updated = 0;
+        for (let i = 0; i < rows.length; i += 500) {
+          const chunk = rows.slice(i, i + 500);
+          const existing = new Set((await q('SELECT reg FROM program_students WHERE program_id=? AND reg IN (?)', [pid, chunk.map((r) => r.reg)])).map((r) => r.reg));
+          await q(`INSERT INTO program_students (id, program_id, reg, name, branch, section, room, emp_id, faculty_name, batch_no, project, ps) VALUES ?
+                   ON DUPLICATE KEY UPDATE name=VALUES(name), branch=VALUES(branch), section=VALUES(section), room=VALUES(room),
+                   emp_id=VALUES(emp_id), faculty_name=VALUES(faculty_name), batch_no=VALUES(batch_no), project=VALUES(project), ps=VALUES(ps)`,
+            [chunk.map((r) => [r.id, pid, r.reg, r.name, r.branch, r.section, r.room, r.empId, r.facultyName, r.batchNo, r.project, r.ps])]);
+          for (const r of chunk) { if (existing.has(r.reg)) updated++; else added++; }
+        }
+        const total = (await q('SELECT COUNT(*) n FROM program_students WHERE program_id=?', [pid]))[0].n;
+        return { added, updated, total };
+      },
+    },
+    programSessions: {
+      byProgram: async (pid) => (await q('SELECT * FROM program_sessions WHERE program_id=? ORDER BY created_at', [pid])).map(toPSession),
+      get: async (id) => { const r = await q('SELECT * FROM program_sessions WHERE id=?', [id]); return r[0] ? toPSession(r[0]) : null; },
+      add: async (s) => { await q('INSERT INTO program_sessions (id, program_id, kind, name, session_date, start_time, end_time, open_rooms, created_at) VALUES (?,?,?,?,?,?,?,?,?)', [s.id, s.programId, s.kind, s.name, s.date, s.startTime, s.endTime, J(s.openRooms || []), s.createdAt]); return s; },
+      update: async (id, p) => {
+        const map = { name: 'name', date: 'session_date', startTime: 'start_time', endTime: 'end_time', openRooms: 'open_rooms' };
+        const sets = [], vals = [];
+        for (const [k, v] of Object.entries(p)) { if (!map[k]) continue; sets.push(`${map[k]}=?`); vals.push(k === 'openRooms' ? J(v) : v); }
+        if (sets.length) { vals.push(id); await q(`UPDATE program_sessions SET ${sets.join(', ')} WHERE id=?`, vals); }
+        const r = await q('SELECT * FROM program_sessions WHERE id=?', [id]); return r[0] ? toPSession(r[0]) : null;
+      },
+      remove: async (id) => { await q('DELETE FROM program_sessions WHERE id=?', [id]); },
+    },
+    programAttendance: {
+      bySession: async (sid) => (await q('SELECT * FROM program_attendance WHERE session_id=?', [sid])).map(toPAtt),
+      byProgram: async (pid) => (await q('SELECT * FROM program_attendance WHERE program_id=?', [pid])).map(toPAtt),
+      get: async (sid, room) => { const r = await q('SELECT * FROM program_attendance WHERE session_id=? AND room=?', [sid, room]); return r[0] ? toPAtt(r[0]) : null; },
+      set: async (a) => {
+        await q(`INSERT INTO program_attendance (session_id, room, program_id, room_label, emp_id, faculty_name, marks, present, absent, total, posted_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE room_label=VALUES(room_label), emp_id=VALUES(emp_id), faculty_name=VALUES(faculty_name), marks=VALUES(marks),
+                 present=VALUES(present), absent=VALUES(absent), total=VALUES(total), posted_at=VALUES(posted_at)`,
+          [a.sessionId, a.room, a.programId, a.roomLabel, a.empId, a.facultyName, J(a.marks || {}), a.present, a.absent, a.total, a.postedAt]);
+        return a;
+      },
+      remove: async (sid, room) => { const r = await q('DELETE FROM program_attendance WHERE session_id=? AND room=?', [sid, room]); return r.affectedRows || 0; },
+    },
+    programScores: {
+      bySession: async (sid) => (await q('SELECT * FROM program_scores WHERE session_id=?', [sid])).map(toPScore),
+      byProgram: async (pid) => (await q('SELECT * FROM program_scores WHERE program_id=?', [pid])).map(toPScore),
+      set: async (s) => {
+        await q(`INSERT INTO program_scores (session_id, reg, program_id, room, present, scores, total, by_emp, posted_at)
+                 VALUES (?,?,?,?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE room=VALUES(room), present=VALUES(present), scores=VALUES(scores), total=VALUES(total), by_emp=VALUES(by_emp), posted_at=VALUES(posted_at)`,
+          [s.sessionId, s.reg, s.programId, s.room, s.present ? 1 : 0, J(s.scores || {}), s.total || 0, s.byEmp || '', s.postedAt]);
+        return s;
+      },
+      removeRoom: async (sid, room) => { const r = await q('DELETE FROM program_scores WHERE session_id=? AND room=?', [sid, room]); return r.affectedRows || 0; },
     },
   };
 }

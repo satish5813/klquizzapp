@@ -7,6 +7,7 @@ import Faculty from './pages/Faculty';
 import AttendanceAdmin from './pages/AttendanceAdmin';
 import Review from './pages/Review';
 import ReviewAdmin from './pages/ReviewAdmin';
+import FacultyRooms from './pages/FacultyRooms';
 
 // Two logos: drop your images at public/logo-left.png and public/logo-right.png.
 // If a file is missing it falls back to a styled badge so the layout never breaks.
@@ -50,6 +51,8 @@ export default function App() {
           <Route path="/attendance-admin" element={<AttendanceAdmin />} />
           <Route path="/review" element={<Review />} />
           <Route path="/review-admin" element={<ReviewAdmin />} />
+          <Route path="/attendance" element={<FacultyRooms key="attendance" kind="attendance" />} />
+          <Route path="/hackathon-review" element={<FacultyRooms key="review" kind="review" />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { initStore } from './db.js';
 import { shuffle, normalizeQuestion } from './util.js';
 import { estimate, generateBank, extractMcqs } from './claude.js';
+import { registerProgramRoutes } from './programs.js';
 
 const PORT = Number(process.env.PORT || 4000);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'change-me-admin';
@@ -32,6 +33,8 @@ const pct = (score, total) => Math.round(((score ?? 0) / total) * 100);
 const clientIp = (req) => String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || '';
 // Normalize a domain label so "Java Core", "JavaCore", "java core" all match.
 const normDomain = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+// Default pass percentage when a domain's schedule doesn't set its own.
+const DEFAULT_PASS_MARK = Number(process.env.PASS_MARK || 75);
 // A screen is considered "still active" if it pinged within this window.
 const SESSION_ACTIVE_MS = 90_000;
 
@@ -109,6 +112,14 @@ app.post('/api/admin/questions/:id', requireAdmin, async (req, res) => {
   res.json(updated);
 });
 
+/** Delete a single question from the bank. */
+app.post('/api/admin/questions/:id/delete', requireAdmin, async (req, res) => {
+  const removed = await db.questions.remove(req.params.id);
+  if (!removed) return res.status(404).json({ error: 'Question not found' });
+  invalidateBank();
+  res.json({ removed, bankTotal: await db.questions.count() });
+});
+
 /** Re-grade all submitted attempts against the CURRENT answer keys (after fixing a wrong answer). */
 app.post('/api/admin/regrade', requireAdmin, async (_req, res) => {
   const { byId } = await getBank();
@@ -161,6 +172,9 @@ app.post('/api/admin/generate', requireAdmin, async (req, res) => {
   const replace = !!req.body?.replace;
   const domain = String(req.body?.domain || '').trim();
   const mix = req.body?.mix && typeof req.body.mix === 'object' ? req.body.mix : null;
+  const year = String(req.body?.year || '').trim().slice(0, 40);
+  const stressConcepts = String(req.body?.stressConcepts || '').trim().slice(0, 500);
+  const rigor = ['standard', 'challenging', 'rigorous'].includes(req.body?.rigor) ? req.body.rigor : 'challenging';
   if (syllabus.length < 10) return res.status(400).json({ error: 'Provide a syllabus (min 10 chars)' });
 
   const jobId = crypto.randomUUID();
@@ -168,7 +182,7 @@ app.post('/api/admin/generate', requireAdmin, async (req, res) => {
   (async () => {
     try {
       const { questions, stats } = await generateBank({
-        apiKey, model: MODEL, syllabus, target: count, mix,
+        apiKey, model: MODEL, syllabus, target: count, mix, year, stressConcepts, rigor,
         existingNorms: await db.questions.normSet(),
         onProgress: (p) => { jobSet(jobId, { ...(jobsLocal.get(jobId) || {}), ...p, status: 'running' }); },
       });
@@ -258,14 +272,47 @@ async function scheduleStatusFor(domain) {
   const durationMin = (s && Number(s.durationMin)) || QUIZ_DURATION_MIN;
   const questionCount = (s && Number(s.questionCount)) || QUIZ_SIZE;
   const mix = normMix(s && s.mix);
-  if (!s || !s.enabled) return { open: false, reason: 'not_scheduled', domain, durationMin, questionCount, mix };
-  return { open: true, reason: 'open', domain, durationMin, questionCount, mix };
+  const round = (s && Number(s.round)) || 1;
+  const passMark = (s && Number(s.passMark)) || DEFAULT_PASS_MARK;
+  if (!s || !s.enabled) return { open: false, reason: 'not_scheduled', domain, durationMin, questionCount, mix, round, passMark };
+  return { open: true, reason: 'open', domain, durationMin, questionCount, mix, round, passMark };
+}
+
+/** Pass mark for a domain (schedule setting, else the default). Harder papers can use a lower bar. */
+async function passMarkFor(domain, schedulesCache) {
+  const all = schedulesCache || (await db.settings.get('schedules')) || {};
+  const key = Object.keys(all).find((k) => normDomain(k) === normDomain(domain));
+  return (key && Number(all[key].passMark)) || DEFAULT_PASS_MARK;
+}
+
+// An attempt belongs to ONE exam = (domain, round), so a student can sit many exams over
+// time (new course uploaded, or a new round of the same domain) without any admin revoke.
+// Legacy attempts with no domain stamped fall back to the student's domain, round 1.
+const attemptDomain = (a, s) => a.domain || s?.domain || '';
+const attemptRound = (a) => Number(a.round) || 1;
+/** Where a student stands: an unfinished attempt (any exam) is resumed first; otherwise
+ *  only a finished attempt of their CURRENT exam (domain + round) counts as completed. */
+function examState(mine, student, round) {
+  const inProgress = mine.find((a) => a.status === 'in_progress');
+  const nd = normDomain(student.domain);
+  const done = mine.find((a) => (a.status === 'submitted' || a.status === 'terminated')
+    && normDomain(attemptDomain(a, student)) === nd && attemptRound(a) === round);
+  return { inProgress, done };
 }
 
 app.get('/api/admin/schedules', requireAdmin, async (_req, res) => {
   const schedules = (await db.settings.get('schedules')) || {};
-  const domains = [...new Set((await db.students.all()).map((s) => s.domain).filter(Boolean))].sort();
-  res.json({ schedules, domains });
+  const students = await db.students.all();
+  // Students per domain, so the UI can warn when a domain has a question bank but nobody to sit it.
+  const studentCounts = {};
+  for (const s of students) if (s.domain) studentCounts[s.domain] = (studentCounts[s.domain] || 0) + 1;
+  // Offer every domain that exists anywhere — student roster OR question bank — so a schedule
+  // can be prepared before/after either one is uploaded.
+  const bankDomains = [...new Set((await getBank()).list.map((q) => q.domain).filter(Boolean))];
+  const seen = new Map(); // normalized -> display label (student label wins)
+  for (const d of [...bankDomains, ...Object.keys(studentCounts)]) seen.set(normDomain(d), d);
+  const domains = [...seen.values()].sort();
+  res.json({ schedules, domains, studentCounts });
 });
 
 app.post('/api/admin/schedules', requireAdmin, async (req, res) => {
@@ -276,9 +323,23 @@ app.post('/api/admin/schedules', requireAdmin, async (req, res) => {
   const questionCount = Math.max(1, Math.min(500, Number(req.body?.questionCount) || QUIZ_SIZE)); // MCQs per exam
   const mix = normMix(req.body?.mix); // Easy/Medium/Hard % (always sums to 100)
   const all = (await db.settings.get('schedules')) || {};
-  all[domain] = { enabled, durationMin, questionCount, mix };
+  const key = Object.keys(all).find((k) => normDomain(k) === normDomain(domain)) || domain;
+  const passMark = Math.max(1, Math.min(100, Number(req.body?.passMark) || DEFAULT_PASS_MARK));
+  all[key] = { enabled, durationMin, questionCount, mix, passMark, round: Number(all[key]?.round) || 1 };
   await db.settings.set('schedules', all);
-  res.json({ domain, ...all[domain] });
+  res.json({ domain: key, ...all[key] });
+});
+
+/** Start a NEW ROUND of a domain's exam: everyone in the domain can sit it again, and
+ *  all earlier-round results are kept. Replaces revoking students one by one. */
+app.post('/api/admin/schedules/new-round', requireAdmin, async (req, res) => {
+  const domain = String(req.body?.domain || '').trim();
+  const all = (await db.settings.get('schedules')) || {};
+  const key = Object.keys(all).find((k) => normDomain(k) === normDomain(domain));
+  if (!key) return res.status(404).json({ error: 'Save a schedule for this domain first.' });
+  all[key] = { ...all[key], round: (Number(all[key].round) || 1) + 1 };
+  await db.settings.set('schedules', all);
+  res.json({ domain: key, ...all[key] });
 });
 
 /** Delete a domain's schedule entry. */
@@ -374,6 +435,18 @@ app.post('/api/admin/students/purge-domain', requireAdmin, async (req, res) => {
   res.json({ ok: true, domain, removed });
 });
 
+/** Delete students that have NO exam domain assigned — e.g. rows created by a bad roster
+ *  upload. Students who already have an attempt/result are never deleted. */
+app.post('/api/admin/students/purge-no-domain', requireAdmin, async (_req, res) => {
+  const students = await db.students.all();
+  const withAttempt = new Set((await db.attempts.all()).map((a) => a.studentId));
+  const noDomain = students.filter((s) => !String(s.domain || '').trim());
+  const targets = noDomain.filter((s) => !withAttempt.has(s.id));
+  const keptWithResults = noDomain.length - targets.length;
+  const removed = await db.students.removeMany(targets.map((s) => s.id));
+  res.json({ removed, keptWithResults, remaining: await db.students.count() });
+});
+
 /** Students list with search, active/inactive filter, and pagination. */
 app.get('/api/admin/students', requireAdmin, async (req, res) => {
   const all = await db.students.all();
@@ -412,10 +485,15 @@ app.post('/api/admin/students/:id', requireAdmin, async (req, res) => {
 // ============ Admin: results & reports ============
 async function attemptRows() {
   const students = new Map((await db.students.all()).map((s) => [s.id, s]));
+  const schedules = (await db.settings.get('schedules')) || {};
+  const markOf = (domain) => {
+    const key = Object.keys(schedules).find((k) => normDomain(k) === normDomain(domain));
+    return (key && Number(schedules[key].passMark)) || DEFAULT_PASS_MARK;
+  };
   return (await db.attempts.all()).map((a) => {
     const s = students.get(a.studentId) || {};
     return {
-      attemptId: a.id, registrationNumber: s.registrationNumber || '', name: s.name || '', branch: s.branch || '', section: s.section || '', domain: s.domain || '',
+      attemptId: a.id, registrationNumber: s.registrationNumber || '', name: s.name || '', branch: s.branch || '', section: s.section || '', domain: attemptDomain(a, s), round: attemptRound(a), passMark: markOf(attemptDomain(a, s)),
       score: a.score, total: a.total, percentage: a.score == null ? null : pct(a.score, a.total),
       status: a.status, reason: a.reason || '', violations: a.violations ?? 0, autoSubmitted: !!a.autoSubmitted,
       ip: a.ip || '', startedAt: a.startedAt, submittedAt: a.submittedAt,
@@ -428,8 +506,8 @@ app.get('/api/admin/attempts', requireAdmin, async (_req, res) => res.json(await
 app.get('/api/admin/export.csv', requireAdmin, async (_req, res) => {
   const rows = await attemptRows();
   const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const header = ['RegistrationNumber', 'Name', 'Branch', 'Section', 'Domain', 'Score', 'Total', 'Percentage', 'Status', 'AutoSubmitted', 'Violations', 'IP', 'StartedAt', 'SubmittedAt'];
-  const lines = rows.map((r) => [r.registrationNumber, r.name, r.branch, r.section, r.domain, r.score ?? '', r.total, r.percentage ?? '', r.status, r.autoSubmitted ? 'yes' : 'no', r.violations ?? 0, r.ip, r.startedAt, r.submittedAt || ''].map(esc).join(','));
+  const header = ['RegistrationNumber', 'Name', 'Branch', 'Section', 'Domain', 'Round', 'Score', 'Total', 'Percentage', 'PassMark', 'Result', 'Status', 'AutoSubmitted', 'Violations', 'IP', 'StartedAt', 'SubmittedAt'];
+  const lines = rows.map((r) => [r.registrationNumber, r.name, r.branch, r.section, r.domain, r.round, r.score ?? '', r.total, r.percentage ?? '', r.passMark, r.percentage == null ? '' : (r.percentage >= r.passMark ? 'PASS' : 'FAIL'), r.status, r.autoSubmitted ? 'yes' : 'no', r.violations ?? 0, r.ip, r.startedAt, r.submittedAt || ''].map(esc).join(','));
   res.setHeader('content-type', 'text/csv');
   res.setHeader('content-disposition', 'attachment; filename="kl-ai-quiz-results.csv"');
   res.send([header.join(','), ...lines].join('\n'));
@@ -518,7 +596,7 @@ app.get('/api/admin/monitor', requireAdmin, async (_req, res) => {
     if (a.autoSubmitted) flags.push({ code: 'auto', label: 'Auto-submitted', sev: 'info' });
     if (!flags.length && !live) continue; // only surface rows needing attention (+ live)
     rows.push({
-      attemptId: a.id, registrationNumber: s.registrationNumber || '', name: s.name || '', section: s.section || '', domain: s.domain || '',
+      attemptId: a.id, registrationNumber: s.registrationNumber || '', name: s.name || '', section: s.section || '', domain: attemptDomain(a, s),
       ip: a.ip || '', status: a.status, live, stuck, violations: a.violations ?? 0, autoSubmitted: !!a.autoSubmitted,
       loginCount: lm.count, ipCount: lm.ips.size, startedAt: a.startedAt, flags,
       sev: flags.some((f) => f.sev === 'high') ? 3 : flags.some((f) => f.sev === 'medium') ? 2 : live ? 1 : 0,
@@ -561,9 +639,10 @@ app.get('/api/admin/attempts/:id/analysis', requireAdmin, async (req, res) => {
   const strengths = byTopic.filter((t) => t.total >= 1 && t.pct >= 70).slice(0, 6);
   const weaknesses = byTopic.filter((t) => t.total >= 1 && t.pct < 50).sort((x, y) => x.pct - y.pct).slice(0, 6);
   res.json({
-    name: student?.name || '', registrationNumber: student?.registrationNumber || '', domain: student?.domain || '',
+    name: student?.name || '', registrationNumber: student?.registrationNumber || '', domain: attemptDomain(a, student), round: attemptRound(a),
     score: a.score ?? 0, total: a.total, percentage: pct(a.score, a.total),
     byDifficulty, byTopic, strengths, weaknesses,
+    passMark: await passMarkFor(attemptDomain(a, student)),
   });
 });
 
@@ -573,10 +652,12 @@ app.get('/api/admin/analysis/domain', requireAdmin, async (req, res) => {
   const nd = normDomain(domain);
   const students = await db.students.all();
   const inDomain = domain ? students.filter((s) => normDomain(s.domain) === nd) : students;
-  const idSet = new Set(inDomain.map((s) => s.id));
-  const sById = new Map(inDomain.map((s) => [s.id, s]));
+  const sById = new Map(students.map((s) => [s.id, s]));
   const { byId } = await getBank();
-  const attempts = (await db.attempts.all()).filter((a) => idSet.has(a.studentId));
+  const attempts = (await db.attempts.all()).filter((a) => !domain || normDomain(attemptDomain(a, sById.get(a.studentId))) === nd);
+  const schedulesAll = (await db.settings.get('schedules')) || {};
+  const markFor = (d) => { const k = Object.keys(schedulesAll).find((x) => normDomain(x) === normDomain(d)); return (k && Number(schedulesAll[k].passMark)) || DEFAULT_PASS_MARK; };
+  const passMark = domain ? markFor(domain) : DEFAULT_PASS_MARK;
   const submitted = attempts.filter((a) => a.status === 'submitted' || a.status === 'terminated');
   const diff = { EASY: { c: 0, t: 0 }, MEDIUM: { c: 0, t: 0 }, HARD: { c: 0, t: 0 } };
   const topicMap = new Map();
@@ -591,15 +672,16 @@ app.get('/api/admin/analysis/domain', requireAdmin, async (req, res) => {
       diff[d].t++; if (ok) diff[d].c++;
       const tp = q.topic || 'General'; const tm = topicMap.get(tp) || { c: 0, t: 0 }; tm.t++; if (ok) tm.c++; topicMap.set(tp, tm);
     }
-    const p = pct(a.score, a.total); sumPct += p; if (p >= 75) passed++;
-    studentRows.push({ registrationNumber: s.registrationNumber || '', name: s.name || '', branch: s.branch || '', section: s.section || '', score: a.score ?? 0, total: a.total, percentage: p, result: p >= 75 ? 'PASS' : 'FAIL', status: a.status, autoSubmitted: !!a.autoSubmitted, violations: a.violations ?? 0, ip: a.ip || '' });
+    const mark = domain ? passMark : markFor(attemptDomain(a, s));
+    const p = pct(a.score, a.total); sumPct += p; if (p >= mark) passed++;
+    studentRows.push({ registrationNumber: s.registrationNumber || '', name: s.name || '', branch: s.branch || '', section: s.section || '', score: a.score ?? 0, total: a.total, percentage: p, result: p >= mark ? 'PASS' : 'FAIL', status: a.status, autoSubmitted: !!a.autoSubmitted, violations: a.violations ?? 0, ip: a.ip || '' });
   }
   const pctOf = (v) => (v.t ? Math.round((v.c / v.t) * 100) : 0);
   const byDifficulty = Object.entries(diff).map(([k, v]) => ({ difficulty: k, correct: v.c, total: v.t, pct: pctOf(v) }));
   const byTopic = [...topicMap].map(([topic, v]) => ({ topic, correct: v.c, total: v.t, pct: pctOf(v) })).sort((x, y) => y.pct - x.pct);
   studentRows.sort((x, y) => y.percentage - x.percentage);
   res.json({
-    domain: domain || '(all)', studentsInDomain: inDomain.length, attempted: attempts.length, submitted: submitted.length,
+    domain: domain || '(all)', passMark, studentsInDomain: inDomain.length, attempted: attempts.length, submitted: submitted.length,
     passed, failed: submitted.length - passed, avgPercentage: submitted.length ? Math.round(sumPct / submitted.length) : 0,
     byDifficulty, byTopic, strengths: byTopic.filter((t) => t.pct >= 70).slice(0, 8), weaknesses: byTopic.filter((t) => t.pct < 50).sort((x, y) => x.pct - y.pct).slice(0, 8),
     students: studentRows,
@@ -614,6 +696,8 @@ app.get('/api/admin/results/analysis.xlsx', requireAdmin, async (_req, res) => {
   const { byId } = await getBank();
   const attempts = (await db.attempts.all()).filter((a) => a.status === 'submitted' || a.status === 'terminated');
   const pctOf = (c, t) => (t ? Math.round((c / t) * 100) : 0);
+  const schedulesX = (await db.settings.get('schedules')) || {};
+  const markX = (d) => { const k = Object.keys(schedulesX).find((x) => normDomain(x) === normDomain(d)); return (k && Number(schedulesX[k].passMark)) || DEFAULT_PASS_MARK; };
 
   const summaryRows = [];
   const topicRows = [];
@@ -638,8 +722,8 @@ app.get('/api/admin/results/analysis.xlsx', requireAdmin, async (_req, res) => {
     const strengths = byTopic.filter((t) => t.total >= 1 && t.pct >= 70).slice(0, 5).map((t) => `${t.topic} (${t.pct}%)`).join(', ');
     const weaknesses = byTopic.filter((t) => t.total >= 1 && t.pct < 50).sort((x, y) => x.pct - y.pct).slice(0, 5).map((t) => `${t.topic} (${t.pct}%)`).join(', ');
     summaryRows.push({
-      'Reg. No': s.registrationNumber || '', Name: s.name || '', Branch: s.branch || '', Section: s.section || '', Domain: s.domain || '',
-      Score: a.score ?? 0, Total: a.total, '%': p, Result: p >= 75 ? 'PASS' : 'FAIL', Status: a.status,
+      'Reg. No': s.registrationNumber || '', Name: s.name || '', Branch: s.branch || '', Section: s.section || '', Domain: attemptDomain(a, s), Round: attemptRound(a),
+      Score: a.score ?? 0, Total: a.total, '%': p, 'Pass mark': markX(attemptDomain(a, s)), Result: p >= markX(attemptDomain(a, s)) ? 'PASS' : 'FAIL', Status: a.status,
       Correct: correct, Wrong: wrong, Unanswered: unanswered,
       'Easy (c/t)': `${diff.EASY.c}/${diff.EASY.t}`, 'Easy %': pctOf(diff.EASY.c, diff.EASY.t),
       'Medium (c/t)': `${diff.MEDIUM.c}/${diff.MEDIUM.t}`, 'Medium %': pctOf(diff.MEDIUM.c, diff.MEDIUM.t),
@@ -648,12 +732,12 @@ app.get('/api/admin/results/analysis.xlsx', requireAdmin, async (_req, res) => {
       'Auto-submitted': a.autoSubmitted ? 'yes' : 'no', Warnings: a.violations ?? 0, IP: a.ip || '',
       Submitted: a.submittedAt ? new Date(a.submittedAt).toLocaleString() : '',
     });
-    for (const t of byTopic) topicRows.push({ 'Reg. No': s.registrationNumber || '', Name: s.name || '', Domain: s.domain || '', Topic: t.topic, Correct: t.correct, Total: t.total, '%': t.pct });
+    for (const t of byTopic) topicRows.push({ 'Reg. No': s.registrationNumber || '', Name: s.name || '', Domain: attemptDomain(a, s), Topic: t.topic, Correct: t.correct, Total: t.total, '%': t.pct });
 
-    const dk = s.domain || '(none)';
+    const dk = attemptDomain(a, s) || '(none)';
     let da = domAgg.get(dk);
     if (!da) { da = { students: 0, sumPct: 0, passed: 0, topic: new Map() }; domAgg.set(dk, da); }
-    da.students++; da.sumPct += p; if (p >= 75) da.passed++;
+    da.students++; da.sumPct += p; if (p >= markX(attemptDomain(a, s))) da.passed++;
     for (const [tp, v] of topicMap) { const tv = da.topic.get(tp) || { c: 0, t: 0 }; tv.c += v.c; tv.t += v.t; da.topic.set(tp, tv); }
   }
   summaryRows.sort((x, y) => y['%'] - x['%']);
@@ -672,7 +756,7 @@ app.get('/api/admin/results/analysis.xlsx', requireAdmin, async (_req, res) => {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
     { Metric: 'Submitted attempts', Value: attempts.length },
     { Metric: 'Students on roster', Value: students.length },
-    { Metric: 'Passed (>= 75%)', Value: summaryRows.filter((r) => r.Result === 'PASS').length },
+    { Metric: 'Passed', Value: summaryRows.filter((r) => r.Result === 'PASS').length },
     { Metric: 'Failed', Value: summaryRows.filter((r) => r.Result === 'FAIL').length },
     { Metric: 'Average %', Value: summaryRows.length ? Math.round(summaryRows.reduce((n, r) => n + r['%'], 0) / summaryRows.length) : 0 },
   ]), 'Summary');
@@ -728,7 +812,11 @@ app.post('/api/faculty/login', async (req, res) => {
   if (!students.length) return res.status(404).json({ error: 'No students are assigned to this Employee ID. Please check the ID.' });
   const attempts = await db.attempts.all();
   const byStudent = new Map();
-  for (const a of attempts) byStudent.set(a.studentId, a); // one attempt per student
+  const stuById = new Map(students.map((s) => [s.id, s]));
+  for (const a of attempts.slice().sort((x, y) => (x.startedAt || '').localeCompare(y.startedAt || ''))) {
+    const s = stuById.get(a.studentId);
+    if (s && normDomain(attemptDomain(a, s)) === normDomain(s.domain)) byStudent.set(a.studentId, a); // latest attempt of the current domain
+  }
   const loggedInRegs = new Set((await db.loginEvents.all()).filter((e) => e.ok).map((e) => e.registrationNumber));
   let present = 0, submitted = 0, inProgress = 0, absent = 0;
   const rows = students.map((s) => {
@@ -1152,29 +1240,27 @@ app.post('/api/login', async (req, res) => {
   const student = await db.students.byRegNo(registrationNumber);
   if (!student) { logLogin('', false, 'not_found'); return res.status(404).json({ error: 'Registration number not found. Please contact the exam coordinator.' }); }
   if (student.active === false) { logLogin(student.name, false, 'deactivated'); return res.status(403).json({ error: 'Your account is deactivated. Please contact the exam coordinator.' }); }
-  const mine = await db.attempts.byStudent(student.id);
-  const done = mine.find((a) => a.status === 'submitted' || a.status === 'terminated');
-  const inProgress = mine.find((a) => a.status === 'in_progress');
+  const schedule = await scheduleStatusFor(student.domain);
+  const { done, inProgress } = examState(await db.attempts.byStudent(student.id), student, schedule.round);
   logLogin(student.name, true, done ? 'completed' : inProgress ? 'resume' : 'ok');
   res.json({
     student: { registrationNumber: student.registrationNumber, name: student.name, branch: student.branch, section: student.section, domain: student.domain || '' },
-    attempt: done ? { state: 'completed', attemptId: done.id, status: done.status, score: done.score ?? 0, total: done.total, percentage: pct(done.score, done.total) }
-      : inProgress ? { state: 'in_progress', attemptId: inProgress.id } : { state: 'none' },
-    quizSize: QUIZ_SIZE, durationMin: QUIZ_DURATION_MIN, schedule: await scheduleStatusFor(student.domain),
+    attempt: inProgress ? { state: 'in_progress', attemptId: inProgress.id }
+      : done ? { state: 'completed', attemptId: done.id, status: done.status, score: done.score ?? 0, total: done.total, percentage: pct(done.score, done.total) }
+      : { state: 'none' },
+    quizSize: QUIZ_SIZE, durationMin: QUIZ_DURATION_MIN, schedule,
   });
 });
 
-/** Begin the exam (one attempt per registration number; one active screen at a time). */
+/** Begin the exam (one attempt per student PER EXAM = domain + round; one active screen at a time). */
 app.post('/api/exam/start', async (req, res) => {
   const registrationNumber = String(req.body?.registrationNumber || '').trim();
   const incomingSid = String(req.body?.sessionId || '');
   const student = await db.students.byRegNo(registrationNumber);
   if (!student) return res.status(404).json({ error: 'Registration number not found.' });
   if (student.active === false) return res.status(403).json({ error: 'Your account is deactivated. Please contact the exam coordinator.' });
-  const mine = await db.attempts.byStudent(student.id);
-  const done = mine.find((a) => a.status === 'submitted' || a.status === 'terminated');
-  if (done) return res.json({ completed: true, attemptId: done.id });
-  const inProgress = mine.find((a) => a.status === 'in_progress');
+  const sch = await scheduleStatusFor(student.domain);
+  const { done, inProgress } = examState(await db.attempts.byStudent(student.id), student, sch.round);
   if (inProgress) {
     // single active screen: block a second device while the first is live (heartbeat fresh)
     const sessionActive = inProgress.lastSeen && (Date.now() - Date.parse(inProgress.lastSeen) < SESSION_ACTIVE_MS);
@@ -1185,8 +1271,8 @@ app.post('/api/exam/start', async (req, res) => {
     await db.attempts.update(inProgress.id, { sessionId: sid, lastSeen: new Date().toISOString() });
     return res.json({ attemptId: inProgress.id, total: inProgress.total, sessionId: sid });
   }
+  if (done) return res.json({ completed: true, attemptId: done.id });
   // The student's DOMAIN exam must be scheduled + open.
-  const sch = await scheduleStatusFor(student.domain);
   if (!sch.open) return res.status(403).json({
     error: `No exam is scheduled for your domain${student.domain ? ` (${student.domain})` : ''} yet. Please wait for the coordinator.`,
     schedule: sch,
@@ -1203,7 +1289,8 @@ app.post('/api/exam/start', async (req, res) => {
   const picked = pickByMix(pool, size, sch.mix); // honour the Easy/Medium/Hard composition
   const sid = crypto.randomUUID();
   const attempt = await db.attempts.add({
-    id: crypto.randomUUID(), studentId: student.id, questionIds: picked.map((q) => q.id),
+    id: crypto.randomUUID(), studentId: student.id, domain: student.domain || '', round: sch.round,
+    questionIds: picked.map((q) => q.id),
     answers: {}, score: null, total: size, status: 'in_progress', reason: '', durationMin: sch.durationMin,
     ip: clientIp(req), autoSubmitted: false,
     sessionId: sid, lastSeen: new Date().toISOString(), startedAt: new Date().toISOString(), submittedAt: null,
@@ -1288,6 +1375,9 @@ app.get('/api/result/:attemptId', async (req, res) => {
   res.json({ score: attempt.score ?? 0, total: attempt.total, percentage: pct(attempt.score, attempt.total), status: attempt.status, terminated, reason: attempt.reason || '', review });
 });
 
+// Programs: titled events with room-wise attendance + hackathon review (see programs.js).
+registerProgramRoutes(app, { db, requireAdmin, getRubric });
+
 // Serve the built student client (same origin as the API) if it's present.
 // Students open https://<this-server>/ and get the exam app; /api/* stays the API.
 const clientDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist');
@@ -1328,6 +1418,25 @@ async function finalizeExpired() {
 // clustered, or this process when running standalone. Otherwise every worker would
 // redundantly sweep the same attempts each minute.
 const runSweep = !cluster.isWorker || cluster.worker.id === 1;
+
+// One-time, idempotent migration: stamp legacy attempts with the exam they belonged to,
+// so re-uploading a student into a NEW course can never re-label or block on old results.
+// Domain comes from the attempt's own questions when possible, else the student's domain.
+async function backfillAttemptExam() {
+  const legacy = (await db.attempts.all()).filter((a) => !a.domain);
+  if (!legacy.length) return;
+  const { byId } = await getBank();
+  const students = new Map((await db.students.all()).map((s) => [s.id, s]));
+  let n = 0;
+  for (const a of legacy) {
+    const fromQ = (a.questionIds || []).map((id) => byId.get(id)?.domain).find(Boolean);
+    const domain = fromQ || students.get(a.studentId)?.domain || '';
+    if (!domain) continue;
+    await db.attempts.update(a.id, { domain, round: 1 }); n++;
+  }
+  console.log(`[migrate] stamped ${n}/${legacy.length} legacy attempt(s) with their exam domain`);
+}
+if (runSweep) backfillAttemptExam().catch((e) => console.error('[migrate]', e.message));
 if (runSweep) setInterval(() => finalizeExpired().catch((e) => console.error('[finalize]', e.message)), 60_000);
 
 app.listen(PORT, () => console.log(`[${APP_NAME}] worker ${cluster.worker?.id || 'standalone'} on http://localhost:${PORT}  (model: ${MODEL}, store: ${db.driver})`));
