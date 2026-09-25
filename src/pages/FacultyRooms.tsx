@@ -142,9 +142,9 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
           </form>
         ) : (
           <>
-            <p className="mt-1 text-sm text-slate-500">{otpMode ? 'Enter your email (or Employee ID). We will email you a sign-in code.' : 'Enter your email or Employee ID to see your rooms.'}</p>
+            <p className="mt-1 text-sm text-slate-500">{otpMode ? 'Enter your email (or Employee ID). We will email you a sign-in code.' : 'Enter your Employee ID to see your rooms.'}</p>
             <form onSubmit={(e) => { e.preventDefault(); if (otpMode) requestOtp(); else plainLogin(); }} className="mt-4 space-y-3">
-              <input autoFocus value={id} onChange={(e) => setId(e.target.value)} placeholder="name@kluniversity.in or Emp ID"
+              <input autoFocus value={id} onChange={(e) => setId(e.target.value)} placeholder={otpMode ? "name@kluniversity.in or Emp ID" : "Employee ID (e.g. 7281)"}
                 className="w-full rounded-xl border border-slate-300 px-4 py-2.5 text-base outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" />
               {error && <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
               <button disabled={loading || !id.trim()} className="w-full rounded-xl bg-teal-600 py-2.5 font-semibold text-white hover:bg-teal-700 disabled:opacity-50">{loading ? 'Please wait…' : otpMode ? 'Send OTP' : 'Open'}</button>

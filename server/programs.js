@@ -36,11 +36,25 @@ const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const PEPPER = () => process.env.OTP_PEPPER || process.env.ADMIN_TOKEN || 'kl-otp';
 const otpHash = (fkey, code) => sha(`${fkey}:${code}:${PEPPER()}`);
 const OTP_DEBUG = () => process.env.OTP_DEBUG === '1' && process.env.NODE_ENV !== 'production';
-const otpOn = () => process.env.FACULTY_OTP !== 'off' && (smtpConfigured() || OTP_DEBUG());
+const DEFAULT_MODE = () => (process.env.FACULTY_OTP === 'off' ? 'empid' : 'otp');
 const maskEmail = (e) => String(e).replace(/^(.{2}).*(@.*)$/, '$1•••$2');
 const OTP_TTL = 10 * 60_000, SESSION_TTL = 12 * 3600_000;
 
 export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
+  // ---------- how faculty sign in ----------
+  // 'otp'   → email OTP (needs SMTP + an email for every faculty)
+  // 'empid' → Employee ID only (no email needed; anyone who knows the ID can post)
+  let modeCache = { at: 0, v: '' };
+  async function loginMode() {
+    if (modeCache.v && Date.now() - modeCache.at < 10_000) return modeCache.v;
+    const saved = await db.settings.get('faculty_login');
+    const v = saved === 'empid' || saved === 'otp' ? saved : DEFAULT_MODE();
+    modeCache = { at: Date.now(), v };
+    return v;
+  }
+  const otpOn = async () => (await loginMode()) === 'otp' && (smtpConfigured() || OTP_DEBUG());
+  const authInfo = async () => ({ mode: await loginMode(), otp: await otpOn(), smtp: smtpConfigured(), smtpUser: smtpUser() });
+
   // ---------- rooms & batches ----------
   /** Group a roster into rooms: label, faculty (1..5), students, batches, reviewer load. */
   function roomsOf(students, dir = new Map()) {
@@ -139,7 +153,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
       const open = (k) => sessions.filter((s) => s.kind === k).reduce((n, s) => n + (s.openRooms || []).length, 0);
       out.push({ ...p, students: students.length, rooms: roomsOf(students).length, attendanceSessions: sessions.filter((s) => s.kind === 'attendance').length, reviewSessions: sessions.filter((s) => s.kind === 'review').length, openRooms: open('attendance') + open('review'), openAttendance: open('attendance'), openReview: open('review'), batchSize: await batchSizeOf(p.id) });
     }
-    res.json({ programs: out, auth: { otp: otpOn(), smtp: smtpConfigured(), smtpUser: smtpUser() } });
+    res.json({ programs: out, auth: await authInfo() });
   });
 
   app.post('/api/admin/programs', requireAdmin, async (req, res) => {
@@ -217,7 +231,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
         m.set(f.key, e);
       }
     }
-    res.json({ faculty: [...m.values()].sort((a, b) => byNatural(a.rooms[0], b.rooms[0]) || a.name.localeCompare(b.name)), auth: { otp: otpOn(), smtp: smtpConfigured(), smtpUser: smtpUser() } });
+    res.json({ faculty: [...m.values()].sort((a, b) => byNatural(a.rooms[0], b.rooms[0]) || a.name.localeCompare(b.name)), auth: await authInfo() });
   });
 
   /** Save faculty emails / Emp IDs: { rows: [{ name | key, email, empId }] } (matched by name). */
@@ -232,6 +246,14 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
       await db.facultyDir.upsert({ key, name, email, empId: txt(r.empId, 32) }); saved++;
     }
     res.json({ saved, invalid });
+  });
+
+  /** Switch how faculty sign in: { mode: 'otp' | 'empid' }. */
+  app.post('/api/admin/faculty-login', requireAdmin, async (req, res) => {
+    const mode = req.body?.mode === 'empid' ? 'empid' : 'otp';
+    await db.settings.set('faculty_login', mode);
+    modeCache = { at: 0, v: '' };
+    res.json(await authInfo());
   });
 
   /** Send a test email to check the SMTP setup. */
@@ -365,7 +387,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
   }
   /** Who is calling? With OTP on: a signed-in session token; otherwise the email / Emp ID sent. */
   async function authFaculty(req, res) {
-    if (otpOn()) {
+    if (await otpOn()) {
       const tok = String(req.headers['x-faculty-token'] || '');
       const s = tok ? await db.facultyAuth.byHash(sha(tok), 'session') : null;
       if (!s || s.expiresAt < new Date().toISOString()) { res.status(401).json({ error: 'Please sign in with the OTP sent to your email.', reauth: true }); return null; }
@@ -377,10 +399,10 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     return f;
   }
 
-  app.get('/api/faculty/auth-mode', (_req, res) => res.json({ otp: otpOn() }));
+  app.get('/api/faculty/auth-mode', async (_req, res) => res.json({ otp: await otpOn(), mode: await loginMode() }));
 
   app.post('/api/faculty/otp/request', async (req, res) => {
-    if (!otpOn()) return res.status(400).json({ error: 'OTP sign-in is not enabled.' });
+    if (!(await otpOn())) return res.status(400).json({ error: 'OTP sign-in is not enabled.' });
     const f = await findFaculty(req.body?.id);
     if (!f) return res.status(404).json({ error: 'No faculty is registered with this email / Employee ID. Please contact the coordinator.' });
     const email = (await db.facultyDir.get(f.key))?.email || f.email;
@@ -405,7 +427,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
   });
 
   app.post('/api/faculty/otp/verify', async (req, res) => {
-    if (!otpOn()) return res.status(400).json({ error: 'OTP sign-in is not enabled.' });
+    if (!(await otpOn())) return res.status(400).json({ error: 'OTP sign-in is not enabled.' });
     const f = await findFaculty(req.body?.id);
     if (!f) return res.status(404).json({ error: 'No faculty is registered with this email / Employee ID.' });
     const code = txt(req.body?.code, 12).replace(/\D/g, '');
