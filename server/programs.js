@@ -553,12 +553,22 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     }
     const rubric = await getRubric(); const critMax = critMaxOf(rubric);
     const scores = new Map((await db.programScores.bySession(c.session.id)).filter((s) => s.room === c.room).map((s) => [s.reg, s]));
+    // totals from this room's earlier review rounds, so the faculty can see them while marking
+    const earlier = (await db.programSessions.byProgram(c.session.programId))
+      .filter((s) => s.kind === 'review' && s.createdAt < c.session.createdAt)
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    const previous = [];
+    for (const s of earlier) {
+      const totals = {};
+      for (const sc of await db.programScores.bySession(s.id)) if (sc.room === c.room) totals[sc.reg] = sc.present ? sc.total : null;
+      if (Object.keys(totals).length) previous.push({ id: s.id, name: s.name, totals });
+    }
     // the project register for this room's certification course(s)
     const codes = [...new Set(c.students.map((s) => (s.courseCode || '').toUpperCase()).filter(Boolean))];
     const projects = codes.length ? await db.courseProjects.byCourses(codes) : [];
     const courses = codes.map((code) => ({ code, name: c.students.find((s) => (s.courseCode || '').toUpperCase() === code)?.courseName || '' }));
     res.json({
-      ...base, rubric, courses, projects: projects.map((p) => ({ projectId: p.projectId, title: p.title, domain: p.domain, courseCode: p.courseCode })),
+      ...base, rubric, courses, previous, projects: projects.map((p) => ({ projectId: p.projectId, title: p.title, domain: p.domain, courseCode: p.courseCode })),
       maxTotal: Object.values(critMax).reduce((n, v) => n + v, 0),
       students: c.students.map((s) => { const sc = scores.get(s.reg); return { ...lite(s), scored: !!sc, present: sc ? sc.present : true, scores: sc ? sc.scores : {}, total: sc ? sc.total : 0 }; }),
     });

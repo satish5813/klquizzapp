@@ -31,7 +31,7 @@ function Logo({ src, fallback }: { src: string; fallback: string }) {
 export default function App() {
   // the faculty attendance / review tables need the full screen width
   const wide = ['/attendance', '/hackathon-review'].includes(useLocation().pathname);
-  const shell = wide ? 'max-w-[1700px]' : 'max-w-5xl';
+  const shell = wide ? 'max-w-none' : 'max-w-5xl';
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/85 backdrop-blur">
