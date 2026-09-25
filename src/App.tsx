@@ -1,4 +1,4 @@
-import { Link, Navigate, Route, Routes } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import Login from './pages/Login';
 import Welcome from './pages/Welcome';
 import Quiz from './pages/Quiz';
@@ -29,10 +29,13 @@ function Logo({ src, fallback }: { src: string; fallback: string }) {
 }
 
 export default function App() {
+  // the faculty attendance / review tables need the full screen width
+  const wide = ['/attendance', '/hackathon-review'].includes(useLocation().pathname);
+  const shell = wide ? 'max-w-[1700px]' : 'max-w-5xl';
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/85 backdrop-blur">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-2.5">
+        <div className={`mx-auto flex ${shell} items-center justify-between gap-3 px-4 py-2.5`}>
           <Logo src="/logo-left.png" fallback="KL" />
           <Link to="/" className="text-center leading-tight">
             <div className="text-base font-bold tracking-tight text-slate-800">KL AI QuizApp</div>
@@ -41,7 +44,7 @@ export default function App() {
           <Logo src="/logo-right.png" fallback="SKILL" />
         </div>
       </header>
-      <main className="mx-auto max-w-5xl px-4 py-8">
+      <main className={`mx-auto ${shell} px-4 py-8`}>
         <Routes>
           <Route path="/" element={<Login />} />
           <Route path="/welcome" element={<Welcome />} />
