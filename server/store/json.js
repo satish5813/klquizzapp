@@ -225,12 +225,21 @@ export const jsonDb = {
       for (const s of cur) { const u = m.get(s.id); if (u && s.programId === pid) { s.batchNo = u.batchNo; s.reviewer = u.reviewer; } }
       write('programStudents', cur);
     },
-    // Project titles typed by the reviewing faculty: [{ reg, project }].
+    // Project titles chosen by the reviewing faculty: [{ reg, project, ps }].
     setProjects: async (pid, rows) => {
-      const cur = read('programStudents'); const m = new Map(rows.map((r) => [String(r.reg), r.project]));
-      for (const s of cur) { if (s.programId === pid && m.has(String(s.reg))) s.project = m.get(String(s.reg)); }
+      const cur = read('programStudents'); const m = new Map(rows.map((r) => [String(r.reg), r]));
+      for (const s of cur) {
+        const u = m.get(String(s.reg));
+        if (s.programId === pid && u) { s.project = u.project; if (u.ps) s.ps = u.ps; }
+      }
       write('programStudents', cur);
     },
+  },
+  // course-wise project register
+  courseProjects: {
+    all: async () => read('courseProjects'),
+    byCourses: async (codes) => read('courseProjects').filter((p) => codes.includes(p.courseCode)),
+    replaceAll: async (rows) => { write('courseProjects', rows); return rows.length; },
   },
   facultyDir: {
     all: async () => read('facultyDir'),

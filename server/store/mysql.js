@@ -133,6 +133,8 @@ export async function makeMysqlDb() {
     // Faculty can be named (1–5 per room) rather than Emp IDs; batches get a reviewer.
     for (const alter of [
       'ALTER TABLE program_students ADD COLUMN faculty_list JSON',
+      "ALTER TABLE program_students ADD COLUMN course_code VARCHAR(32) DEFAULT ''",
+      "ALTER TABLE program_students ADD COLUMN course_name VARCHAR(255) DEFAULT ''",
       "ALTER TABLE program_students ADD COLUMN reviewer VARCHAR(190) DEFAULT ''",
     ]) { try { await q(alter); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; } }
     await q('ALTER TABLE program_attendance MODIFY emp_id VARCHAR(190)');
@@ -147,6 +149,12 @@ export async function makeMysqlDb() {
       expires_at VARCHAR(32), attempts INT DEFAULT 0, created_at VARCHAR(32),
       INDEX ix_fk (fkey, kind), INDEX ix_hash (secret_hash)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    // the university's course-wise project register (faculty pick a team's project from it)
+    await q(`CREATE TABLE IF NOT EXISTS course_projects (
+      id VARCHAR(64) PRIMARY KEY, course_code VARCHAR(32) NOT NULL, course_name VARCHAR(255),
+      project_id VARCHAR(64), title VARCHAR(500), domain VARCHAR(190),
+      INDEX ix_course (course_code)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
     // migrate a pre-existing single-key (emp_id) table to the session-scoped composite key
     try { await q("ALTER TABLE attendance_postings ADD COLUMN session_id VARCHAR(64) NOT NULL DEFAULT ''"); }
     catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
@@ -159,7 +167,8 @@ export async function makeMysqlDb() {
   const toBatch = (r) => ({ id: r.id, section: r.section || '', batchNo: r.batch_no || '', empId: r.emp_id || '', facultyName: r.faculty_name || '', room: r.room || '', project: r.project || '', ps: r.ps || '', members: r.members || [] });
   const toScore = (r) => ({ id: r.id, reviewId: r.review_id, batchId: r.batch_id, reg: r.reg, present: !!r.present, scores: r.scores || {}, total: r.total ?? 0, byEmp: r.by_emp || '', postedAt: r.posted_at });
   const toProgram = (r) => ({ id: r.id, title: r.title, createdAt: r.created_at });
-  const toPStudent = (r) => ({ id: r.id, programId: r.program_id, reg: r.reg, name: r.name || '', branch: r.branch || '', section: r.section || '', room: r.room || '', empId: r.emp_id || '', facultyName: r.faculty_name || '', facultyList: Array.isArray(r.faculty_list) ? r.faculty_list : [], batchNo: r.batch_no || '', reviewer: r.reviewer || '', project: r.project || '', ps: r.ps || '' });
+  const toPStudent = (r) => ({ id: r.id, programId: r.program_id, reg: r.reg, courseCode: r.course_code || '', courseName: r.course_name || '', name: r.name || '', branch: r.branch || '', section: r.section || '', room: r.room || '', empId: r.emp_id || '', facultyName: r.faculty_name || '', facultyList: Array.isArray(r.faculty_list) ? r.faculty_list : [], batchNo: r.batch_no || '', reviewer: r.reviewer || '', project: r.project || '', ps: r.ps || '' });
+  const toCProject = (r) => ({ id: r.id, courseCode: r.course_code, courseName: r.course_name || '', projectId: r.project_id || '', title: r.title || '', domain: r.domain || '' });
   const toFac = (r) => ({ key: r.fkey, name: r.name || '', email: r.email || '', empId: r.emp_id || '', updatedAt: r.updated_at });
   const toAuth = (r) => ({ id: r.id, fkey: r.fkey, kind: r.kind, secretHash: r.secret_hash, expiresAt: r.expires_at, attempts: r.attempts ?? 0, createdAt: r.created_at });
   const toPSession = (r) => ({ id: r.id, programId: r.program_id, kind: r.kind, name: r.name || '', date: r.session_date || '', startTime: r.start_time || '', endTime: r.end_time || '', openRooms: Array.isArray(r.open_rooms) ? r.open_rooms : [], createdAt: r.created_at });
@@ -375,11 +384,12 @@ export async function makeMysqlDb() {
           const chunk = rows.slice(i, i + 500);
           const existing = new Set((await q('SELECT reg FROM program_students WHERE program_id=? AND reg IN (?)', [pid, chunk.map((r) => r.reg)])).map((r) => r.reg));
           // A re-upload without a Batch column keeps the batches already assigned.
-          await q(`INSERT INTO program_students (id, program_id, reg, name, branch, section, room, emp_id, faculty_name, faculty_list, batch_no, project, ps) VALUES ?
+          await q(`INSERT INTO program_students (id, program_id, reg, name, branch, section, room, emp_id, faculty_name, faculty_list, batch_no, project, ps, course_code, course_name) VALUES ?
                    ON DUPLICATE KEY UPDATE name=VALUES(name), branch=VALUES(branch), section=VALUES(section), room=VALUES(room),
                    emp_id=VALUES(emp_id), faculty_name=VALUES(faculty_name), faculty_list=VALUES(faculty_list),
-                   batch_no=IF(VALUES(batch_no)='', batch_no, VALUES(batch_no)), project=VALUES(project), ps=VALUES(ps)`,
-            [chunk.map((r) => [r.id, pid, r.reg, r.name, r.branch, r.section, r.room, r.empId, r.facultyName, J(r.facultyList || []), r.batchNo, r.project, r.ps])]);
+                   batch_no=IF(VALUES(batch_no)='', batch_no, VALUES(batch_no)), project=VALUES(project), ps=VALUES(ps),
+                   course_code=VALUES(course_code), course_name=VALUES(course_name)`,
+            [chunk.map((r) => [r.id, pid, r.reg, r.name, r.branch, r.section, r.room, r.empId, r.facultyName, J(r.facultyList || []), r.batchNo, r.project, r.ps, r.courseCode || '', r.courseName || ''])]);
           for (const r of chunk) { if (existing.has(r.reg)) updated++; else added++; }
         }
         const total = (await q('SELECT COUNT(*) n FROM program_students WHERE program_id=?', [pid]))[0].n;
@@ -397,9 +407,29 @@ export async function makeMysqlDb() {
       },
       // Project titles typed by the reviewing faculty: [{ reg, project }].
       setProjects: async (pid, rows) => {
-        for (const r of rows) await q('UPDATE program_students SET project=? WHERE program_id=? AND reg=?', [String(r.project || '').slice(0, 2000), pid, String(r.reg)]);
+        for (const r of rows) {
+          const ps = String(r.ps || '');
+          await q("UPDATE program_students SET project=?, ps=IF(?='', ps, ?) WHERE program_id=? AND reg=?",
+            [String(r.project || '').slice(0, 2000), ps, ps, pid, String(r.reg)]);
+        }
       },
     },
+    // course-wise project register
+    courseProjects: {
+      all: async () => (await q('SELECT * FROM course_projects ORDER BY course_code, project_id')).map(toCProject),
+      byCourses: async (codes) => (codes.length ? (await q('SELECT * FROM course_projects WHERE course_code IN (?) ORDER BY course_code, project_id', [codes])).map(toCProject) : []),
+      replaceAll: async (rows) => {
+        await q('DELETE FROM course_projects');
+        for (let i = 0; i < rows.length; i += 500) {
+          const chunk = rows.slice(i, i + 500);
+          if (!chunk.length) continue;
+          await q('INSERT INTO course_projects (id, course_code, course_name, project_id, title, domain) VALUES ?',
+            [chunk.map((r) => [r.id, r.courseCode, r.courseName, r.projectId, r.title, r.domain])]);
+        }
+        return rows.length;
+      },
+    },
+
     facultyDir: {
       all: async () => (await q('SELECT * FROM faculty_directory')).map(toFac),
       get: async (fkey) => { const r = await q('SELECT * FROM faculty_directory WHERE fkey=?', [fkey]); return r[0] ? toFac(r[0]) : null; },

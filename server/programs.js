@@ -191,7 +191,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
       if (!reg || !name || seen.has(reg)) { skipped++; continue; }
       seen.add(reg);
       const faculty = (Array.isArray(s.faculty) ? s.faculty : [s.facultyName]).filter(isRealName).map((n) => txt(cleanName(n)));
-      rows.push({ id: crypto.randomUUID(), reg, name, branch: txt(s.branch, 64), section: txt(s.section, 64), room: txt(s.room, 64), empId: txt(s.empId, 32), facultyName: faculty[0] || '', facultyList: faculty, batchNo: txt(s.batchNo, 32), project: txt(s.project, 2000), ps: txt(s.ps, 64) });
+      rows.push({ id: crypto.randomUUID(), reg, name, branch: txt(s.branch, 64), section: txt(s.section, 64), room: txt(s.room, 64), empId: txt(s.empId, 32), facultyName: faculty[0] || '', facultyList: faculty, batchNo: txt(s.batchNo, 32), project: txt(s.project, 2000), ps: txt(s.ps, 64), courseCode: txt(s.courseCode, 32).toUpperCase(), courseName: txt(s.courseName, 255) });
       // a roster that carries a faculty email / Emp ID fills the directory (for OTP sign-in)
       if (faculty[0] && (txt(s.facultyEmail) || txt(s.empId))) await db.facultyDir.upsert({ key: facultyKey(faculty[0]), name: faculty[0], email: txt(s.facultyEmail).toLowerCase(), empId: txt(s.empId, 32) });
     }
@@ -261,6 +261,47 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     await db.settings.set('faculty_login', mode);
     modeCache = { at: 0, v: '' };
     res.json(await authInfo());
+  });
+
+  /** Upload the course-wise project register: { rows: [{ courseCode, courseName, projectId, title, domain }] }.
+   *  Faculty then pick a team's project from the list for their room's certification course. */
+  app.post('/api/admin/course-projects', requireAdmin, async (req, res) => {
+    const raw = Array.isArray(req.body?.rows) ? req.body.rows : null;
+    if (!raw) return res.status(400).json({ error: 'Body must be { rows: [...] }' });
+    const seen = new Set(); const rows = [];
+    for (const r of raw) {
+      const courseCode = txt(r.courseCode, 32).toUpperCase(); const title = txt(r.title, 500);
+      if (!courseCode || !title) continue;
+      const projectId = txt(r.projectId, 64);
+      const key = `${courseCode}|${projectId || title}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({ id: crypto.randomUUID(), courseCode, courseName: txt(r.courseName, 255), projectId, title, domain: txt(r.domain, 190) });
+    }
+    if (!rows.length) return res.status(400).json({ error: 'No valid rows (each needs a course code and a project title).' });
+    await db.courseProjects.replaceAll(rows);
+    const byCourse = {};
+    for (const r of rows) byCourse[r.courseCode] = (byCourse[r.courseCode] || 0) + 1;
+    res.json({ total: rows.length, courses: Object.entries(byCourse).map(([code, n]) => ({ code, name: rows.find((r) => r.courseCode === code).courseName, projects: n })) });
+  });
+
+  /** The stored project register, with how many of each course's projects a program can use. */
+  app.get('/api/admin/course-projects', requireAdmin, async (req, res) => {
+    const all = await db.courseProjects.all();
+    const byCourse = new Map();
+    for (const r of all) { const e = byCourse.get(r.courseCode) || { code: r.courseCode, name: r.courseName, projects: 0 }; e.projects++; byCourse.set(r.courseCode, e); }
+    let used = [];
+    if (req.query.programId) {
+      const students = await db.programStudents.byProgram(String(req.query.programId));
+      const m = new Map();
+      for (const s of students) {
+        const code = (s.courseCode || '').toUpperCase(); if (!code) continue;
+        const e = m.get(code) || { code, name: s.courseName || '', students: 0, rooms: new Set() };
+        e.students++; e.rooms.add(roomKey(s.room)); m.set(code, e);
+      }
+      used = [...m.values()].map((e) => ({ ...e, rooms: [...e.rooms].sort(byNatural), projects: byCourse.get(e.code)?.projects || 0 })).sort((a, b) => byNatural(a.code, b.code));
+    }
+    res.json({ total: all.length, courses: [...byCourse.values()].sort((a, b) => byNatural(a.code, b.code)), used });
   });
 
   /** Send a test email to check the SMTP setup. */
@@ -505,14 +546,22 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
   app.post('/api/faculty/program/room', async (req, res) => {
     const c = await facultyRoom(req, res); if (!c) return;
     const base = { program: c.program, session: { id: c.session.id, name: c.session.name, kind: c.session.kind, date: c.session.date, startTime: c.session.startTime, endTime: c.session.endTime }, room: c.room, label: c.label, open: c.open };
-    const lite = (s) => ({ reg: s.reg, name: s.name, branch: s.branch, section: s.section, batchNo: s.batchNo, project: s.project, ps: s.ps });
+    const lite = (s) => ({ reg: s.reg, name: s.name, branch: s.branch, section: s.section, batchNo: s.batchNo, project: s.project, ps: s.ps, courseCode: s.courseCode || '', courseName: s.courseName || '' });
     if (c.session.kind === 'attendance') {
       const p = await db.programAttendance.get(c.session.id, c.room);
       return res.json({ ...base, posting: p ? { postedAt: p.postedAt, present: p.present, absent: p.absent, total: p.total, by: p.facultyName } : null, students: c.students.map((s) => ({ ...lite(s), present: p ? !!p.marks[s.reg] : null })) });
     }
     const rubric = await getRubric(); const critMax = critMaxOf(rubric);
     const scores = new Map((await db.programScores.bySession(c.session.id)).filter((s) => s.room === c.room).map((s) => [s.reg, s]));
-    res.json({ ...base, rubric, maxTotal: Object.values(critMax).reduce((n, v) => n + v, 0), students: c.students.map((s) => { const sc = scores.get(s.reg); return { ...lite(s), scored: !!sc, present: sc ? sc.present : true, scores: sc ? sc.scores : {}, total: sc ? sc.total : 0 }; }) });
+    // the project register for this room's certification course(s)
+    const codes = [...new Set(c.students.map((s) => (s.courseCode || '').toUpperCase()).filter(Boolean))];
+    const projects = codes.length ? await db.courseProjects.byCourses(codes) : [];
+    const courses = codes.map((code) => ({ code, name: c.students.find((s) => (s.courseCode || '').toUpperCase() === code)?.courseName || '' }));
+    res.json({
+      ...base, rubric, courses, projects: projects.map((p) => ({ projectId: p.projectId, title: p.title, domain: p.domain, courseCode: p.courseCode })),
+      maxTotal: Object.values(critMax).reduce((n, v) => n + v, 0),
+      students: c.students.map((s) => { const sc = scores.get(s.reg); return { ...lite(s), scored: !!sc, present: sc ? sc.present : true, scores: sc ? sc.scores : {}, total: sc ? sc.total : 0 }; }),
+    });
   });
 
   /** Submit attendance for the whole room — once per session (admin can revoke to redo). */
@@ -543,7 +592,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     const now = new Date().toISOString(); let saved = 0; const projects = []; const batches = new Map();
     for (const r of rows) {
       const reg = txt(r.reg, 64); if (!mine.has(reg)) continue;
-      if (typeof r.project === 'string') projects.push({ reg, project: txt(r.project, 2000) });
+      if (typeof r.project === 'string') projects.push({ reg, project: txt(r.project, 2000), ps: txt(r.projectId, 64) });
       if (typeof r.batchNo === 'string') batches.set(reg, txt(r.batchNo, 32).toUpperCase());
       const scores = {};
       for (const [k, v] of Object.entries(r.scores || {})) { if (critMax[k] == null) continue; const n = Math.round(Number(v)); if (!isNaN(n) && n >= 0) scores[k] = Math.min(n, critMax[k]); }
@@ -558,15 +607,16 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     if (newBatch.length) await db.programStudents.setBatches(c.session.programId, newBatch);
     // one project title per team: copy it to every member of the same batch in this room
     const teamProject = new Map();
-    for (const p of projects) { const b = batches.get(p.reg) ?? byId.get(p.reg).batchNo; if (b && p.project) teamProject.set(b, p.project); }
+    for (const p of projects) { const b = batches.get(p.reg) ?? byId.get(p.reg).batchNo; if (b && p.project) teamProject.set(b, { project: p.project, ps: p.ps }); }
     for (const s of c.students) {
       const b = batches.get(s.reg) ?? s.batchNo;
       if (!b || !teamProject.has(b)) continue;
+      const t = teamProject.get(b);
       const own = projects.find((p) => p.reg === s.reg);
-      if (!own) projects.push({ reg: s.reg, project: teamProject.get(b) });
-      else if (!own.project) own.project = teamProject.get(b); // a blank member keeps the team's title
+      if (!own) projects.push({ reg: s.reg, ...t });
+      else if (!own.project) Object.assign(own, t); // a blank member keeps the team's title
     }
-    const changed = projects.filter((p) => (byId.get(p.reg)?.project || '') !== p.project);
+    const changed = projects.filter((p) => (byId.get(p.reg)?.project || '') !== p.project || (p.ps && (byId.get(p.reg)?.ps || '') !== p.ps));
     if (changed.length) await db.programStudents.setProjects(c.session.programId, changed);
     res.json({ ok: true, saved, batched: newBatch.length, postedAt: now });
   });

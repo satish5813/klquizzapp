@@ -8,9 +8,10 @@ interface Card { programId: string; programTitle: string; sessionId: string; ses
 interface LoginRes { faculty: { name: string }; cards: Card[]; }
 interface Stu { reg: string; name: string; branch: string; section: string; batchNo: string; project: string; ps: string; present: boolean | null; scored?: boolean; scores?: Record<string, number>; total?: number; }
 interface Crit { label: string; max: number; bands: string[]; }
-interface RoomRes { program: { id: string; title: string }; session: { id: string; name: string; date: string; startTime: string; endTime: string }; room: string; label: string; open: boolean; posting?: { postedAt: string; present: number; absent: number; total: number; by: string } | null; students: Stu[]; rubric?: { bandLabels: string[]; tables: { name: string; criteria: Crit[] }[] }; maxTotal?: number; }
+interface Proj { projectId: string; title: string; domain: string; courseCode: string; }
+interface RoomRes { courses?: { code: string; name: string }[]; projects?: Proj[]; program: { id: string; title: string }; session: { id: string; name: string; date: string; startTime: string; endTime: string }; room: string; label: string; open: boolean; posting?: { postedAt: string; present: number; absent: number; total: number; by: string } | null; students: Stu[]; rubric?: { bandLabels: string[]; tables: { name: string; criteria: Crit[] }[] }; maxTotal?: number; }
 
-interface RowState { present: boolean; scores: Record<string, number>; project: string; batchNo: string; }
+interface RowState { present: boolean; scores: Record<string, number>; project: string; projectId: string; batchNo: string; }
 const when = (c: { date: string; startTime: string; endTime: string }) => [c.date ? new Date(c.date + 'T00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '', c.startTime && c.endTime ? `${c.startTime}–${c.endTime}` : c.startTime].filter(Boolean).join(' · ');
 
 export default function FacultyRooms({ kind }: { kind: Kind }) {
@@ -90,7 +91,7 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
       setRoom(r);
       if (isReview) {
         const init: typeof rows = {};
-        for (const s of r.students) init[s.reg] = { present: s.present !== false, scores: { ...(s.scores || {}) }, project: s.project || '', batchNo: s.batchNo || '' };
+        for (const s of r.students) init[s.reg] = { present: s.present !== false, scores: { ...(s.scores || {}) }, project: s.project || '', projectId: s.ps || '', batchNo: s.batchNo || '' };
         setRows(init);
       } else {
         const init: Record<string, boolean> = {};
@@ -120,7 +121,7 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
       // only the students you actually touched — the rest stay "not scored"
       const payload = Object.entries(rows)
         .filter(([, r]) => !r.present || Object.keys(r.scores || {}).length > 0 || (r.project || '').trim() || (r.batchNo || '').trim())
-        .map(([reg, r]) => ({ reg, present: r.present, scores: r.scores, project: r.project, batchNo: r.batchNo }));
+        .map(([reg, r]) => ({ reg, present: r.present, scores: r.scores, project: r.project, projectId: r.projectId, batchNo: r.batchNo }));
       const res = await call<{ saved: number; postedAt: string }>('/api/faculty/program/review', { sessionId: room.session.id, room: room.room, rows: payload });
       await openRoom({ sessionId: room.session.id, room: room.room });
       setNote(`Saved ${res.saved} student(s) at ${new Date(res.postedAt).toLocaleTimeString('en-IN')} ✓ — you can keep editing while the room is open.`);
@@ -267,23 +268,25 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
     return out;
   };
   const editable = room.open;
-  const row = (reg: string) => rows[reg] || { present: true, scores: {}, project: '', batchNo: '' };
+  const row = (reg: string) => rows[reg] || { present: true, scores: {}, project: '', projectId: '', batchNo: '' };
   const patch = (reg: string, p: Partial<RowState>) => setRows((r) => ({ ...r, [reg]: { ...row(reg), ...p } }));
   const totalOf = (reg: string) => (row(reg).present ? Object.values(row(reg).scores || {}).reduce((n, v) => n + (Number(v) || 0), 0) : 0);
   const setScore = (reg: string, key: string, v: number) =>
-    setRows((r) => { const cur = r[reg] || { present: true, scores: {}, project: '', batchNo: '' }; const scores = { ...cur.scores }; if (scores[key] === v) delete scores[key]; else scores[key] = v; return { ...r, [reg]: { ...cur, scores } }; });
+    setRows((r) => { const cur = r[reg] || { present: true, scores: {}, project: '', projectId: '', batchNo: '' }; const scores = { ...cur.scores }; if (scores[key] === v) delete scores[key]; else scores[key] = v; return { ...r, [reg]: { ...cur, scores } }; });
   const isDone = (s: Stu) => row(s.reg).present === false || Object.keys(row(s.reg).scores || {}).length >= crit.length;
   const done = room.students.filter(isDone).length;
   // typing a batch number joins that student to the team: same project title, grouped together
   const setBatch = (reg: string, v: string) => {
     const b = v.toUpperCase().trim();
     const mate = b ? room.students.find((s) => s.reg !== reg && row(s.reg).batchNo === b && row(s.reg).project) : null;
-    patch(reg, { batchNo: b, ...(mate ? { project: row(mate.reg).project } : {}) });
+    patch(reg, { batchNo: b, ...(mate ? { project: row(mate.reg).project, projectId: row(mate.reg).projectId } : {}) });
   };
   const setProject = (reg: string, v: string) => {
+    const hit = (room.projects || []).find((p) => p.title === v);
+    const val = { project: v, projectId: hit?.projectId || '' };
     const b = row(reg).batchNo;
-    if (!b) return patch(reg, { project: v });
-    setRows((r) => { const next = { ...r }; for (const s of room.students) if ((next[s.reg]?.batchNo || '') === b) next[s.reg] = { ...next[s.reg], project: v }; return next; });
+    if (!b) return patch(reg, val);
+    setRows((r) => { const next = { ...r }; for (const s of room.students) if ((next[s.reg]?.batchNo || '') === b) next[s.reg] = { ...next[s.reg], ...val }; return next; });
   };
   const TONE = [
     { head: 'bg-teal-50 text-teal-800', on: 'bg-teal-600 text-white ring-teal-600', off: 'text-teal-700 ring-teal-200 hover:bg-teal-50' },
@@ -303,6 +306,8 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
   const waiting = keyed.filter((k) => !k.b).map((k) => k.s);
   if (waiting.length) groups.push({ batch: '', list: waiting });
   const cols = 5 + crit.length;
+  // the project register for this room's certification course (empty → the faculty types a title)
+  const catalogue = room.projects || [];
   return (
     <div className="space-y-3 pb-16">
       {header}
@@ -323,7 +328,17 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Marks scale</span>
           {bands.map((b) => <span key={b} className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">{b}</span>)}
+          {(room.courses || []).map((c) => (
+            <span key={c.code} className="rounded-full bg-teal-50 px-2 py-0.5 text-[11px] font-medium text-teal-700 ring-1 ring-teal-200" title={c.name}>
+              {c.code}{catalogue.filter((p) => p.courseCode === c.code).length ? ` · ${catalogue.filter((p) => p.courseCode === c.code).length} projects` : ' · no project list'}
+            </span>
+          ))}
         </div>
+        {!!catalogue.length && (
+          <datalist id="room-projects">
+            {catalogue.map((p) => <option key={p.projectId || p.title} value={p.title}>{[p.projectId, p.domain].filter(Boolean).join(' · ')}</option>)}
+          </datalist>
+        )}
       </div>
       {error && <div className="rounded-xl bg-red-50 px-4 py-2.5 text-sm text-red-700">{error}</div>}
       {note && <div className="rounded-xl bg-green-50 px-4 py-2.5 text-sm font-medium text-green-700">{note}</div>}
@@ -352,9 +367,13 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
                         : <span className="rounded-lg bg-slate-200 px-2.5 py-1 text-xs font-bold text-slate-600">NO BATCH YET</span>}
                       <span className="text-xs text-slate-500">{g.list.length} student{g.list.length === 1 ? '' : 's'}</span>
                       {g.batch && (
-                        <input value={row(g.list[0].reg).project} disabled={!editable} placeholder="Project title (applies to the whole batch)"
-                          onChange={(e) => setProject(g.list[0].reg, e.target.value)}
-                          className="w-72 rounded-md border border-teal-200 bg-white px-2 py-1 text-xs outline-none focus:border-teal-500 disabled:bg-transparent" />
+                        <>
+                          <input list={catalogue.length ? 'room-projects' : undefined} value={row(g.list[0].reg).project} disabled={!editable}
+                            placeholder={catalogue.length ? `Pick this batch's project (${catalogue.length} for ${room.courses?.[0]?.code || 'this course'})` : 'Project title (applies to the whole batch)'}
+                            onChange={(e) => setProject(g.list[0].reg, e.target.value)}
+                            className="w-[26rem] rounded-md border border-teal-200 bg-white px-2 py-1 text-xs outline-none focus:border-teal-500 disabled:bg-transparent" />
+                          {row(g.list[0].reg).projectId && <span className="rounded-md bg-white px-1.5 py-0.5 font-mono text-[10px] text-teal-700 ring-1 ring-teal-200">{row(g.list[0].reg).projectId}</span>}
+                        </>
                       )}
                       {g.batch
                         ? avg != null && <span className="ml-auto rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-teal-700 ring-1 ring-teal-200">Batch average {avg}/{room.maxTotal} · {marked.length}/{g.list.length} marked</span>
