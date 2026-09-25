@@ -225,6 +225,12 @@ export const jsonDb = {
       for (const s of cur) { const u = m.get(s.id); if (u && s.programId === pid) { s.batchNo = u.batchNo; s.reviewer = u.reviewer; } }
       write('programStudents', cur);
     },
+    // Project titles typed by the reviewing faculty: [{ reg, project }].
+    setProjects: async (pid, rows) => {
+      const cur = read('programStudents'); const m = new Map(rows.map((r) => [String(r.reg), r.project]));
+      for (const s of cur) { if (s.programId === pid && m.has(String(s.reg))) s.project = m.get(String(s.reg)); }
+      write('programStudents', cur);
+    },
   },
   facultyDir: {
     all: async () => read('facultyDir'),

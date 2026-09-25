@@ -22,7 +22,7 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
   const [data, setData] = useState<LoginRes | null>(null);
   const [room, setRoom] = useState<RoomRes | null>(null);
   const [marks, setMarks] = useState<Record<string, boolean>>({});
-  const [rows, setRows] = useState<Record<string, { present: boolean; scores: Record<string, number> }>>({});
+  const [rows, setRows] = useState<Record<string, { present: boolean; scores: Record<string, number>; project: string }>>({});
   const [q, setQ] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -89,7 +89,7 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
       setRoom(r);
       if (isReview) {
         const init: typeof rows = {};
-        for (const s of r.students) init[s.reg] = { present: s.present !== false, scores: { ...(s.scores || {}) } };
+        for (const s of r.students) init[s.reg] = { present: s.present !== false, scores: { ...(s.scores || {}) }, project: s.project || '' };
         setRows(init);
       } else {
         const init: Record<string, boolean> = {};
@@ -116,7 +116,7 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
     if (!room) return;
     setSaving(true); setError('');
     try {
-      const payload = Object.entries(rows).map(([reg, r]) => ({ reg, present: r.present, scores: r.scores }));
+      const payload = Object.entries(rows).map(([reg, r]) => ({ reg, present: r.present, scores: r.scores, project: r.project }));
       const res = await call<{ saved: number; postedAt: string }>('/api/faculty/program/review', { sessionId: room.session.id, room: room.room, rows: payload });
       await openRoom({ sessionId: room.session.id, room: room.room });
       setNote(`Saved ${res.saved} student(s) at ${new Date(res.postedAt).toLocaleTimeString('en-IN')} ✓ — you can keep editing while the room is open.`);
@@ -250,65 +250,82 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
     );
   }
 
-  // ---------- Room: review marks ----------
+  // ---------- Room: review marks (one compact row per student) ----------
   const crit = (room.rubric?.tables || []).flatMap((t, ti) => t.criteria.map((c, ci) => ({ key: `t${ti}_c${ci}`, ...c })));
   const editable = room.open;
   const totalOf = (reg: string) => (rows[reg]?.present ? Object.values(rows[reg].scores || {}).reduce((n, v) => n + (Number(v) || 0), 0) : 0);
   const setScore = (reg: string, key: string, max: number, v: string) => {
     const n = v === '' ? NaN : Math.max(0, Math.min(max, Math.round(Number(v))));
-    setRows((r) => { const cur = r[reg] || { present: true, scores: {} }; const scores = { ...cur.scores }; if (isNaN(n)) delete scores[key]; else scores[key] = n; return { ...r, [reg]: { ...cur, scores } }; });
+    setRows((r) => { const cur = r[reg] || { present: true, scores: {}, project: '' }; const scores = { ...cur.scores }; if (isNaN(n)) delete scores[key]; else scores[key] = n; return { ...r, [reg]: { ...cur, scores } }; });
   };
-  const batches = [...new Set(filtered.map((s) => s.batchNo || ''))];
+  const done = room.students.filter((s) => Object.keys(rows[s.reg]?.scores || {}).length >= crit.length || rows[s.reg]?.present === false).length;
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 pb-16">
       {header}
       <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{room.program.title}</p>
-        <h2 className="text-lg font-bold text-slate-800">Room {room.label} · {room.session.name}</h2>
-        <p className="text-sm text-slate-500">{editable ? `Enter marks for each student (max ${room.maxTotal}). Save anytime — you can edit until the room is closed.` : 'This room is closed — marks are read-only.'}</p>
-        <div className="mt-2 flex flex-wrap gap-1.5">{crit.map((c) => <span key={c.key} title={c.bands.join(' | ')} className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600">{c.label} /{c.max}</span>)}</div>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div className="mr-auto">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{room.program.title}</p>
+            <h2 className="text-lg font-bold text-slate-800">Room {room.label} · {room.session.name}</h2>
+          </div>
+          <span className="rounded-full bg-slate-100 px-3 py-1 text-sm font-semibold text-slate-700">{done}/{room.students.length} done</span>
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search reg no / name / batch"
+            className="w-56 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-teal-500" />
+        </div>
+        <p className="mt-1 text-sm text-slate-500">{editable ? `Type marks straight into the table (max ${room.maxTotal}). Save anytime — you can edit until the room is closed.` : 'This room is closed — marks are read-only.'}</p>
       </div>
       {error && <div className="rounded-xl bg-red-50 px-4 py-2.5 text-sm text-red-700">{error}</div>}
       {note && <div className="rounded-xl bg-green-50 px-4 py-2.5 text-sm font-medium text-green-700">{note}</div>}
-      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search reg no / name" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-teal-500" />
-      {batches.map((b) => {
-        const group = filtered.filter((s) => (s.batchNo || '') === b);
-        return (
-          <div key={b || 'none'} className="space-y-2">
-            {b && <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Batch {b}{group[0]?.project ? ` · ${group[0].project}` : ''}{group[0]?.ps ? ` · ${group[0].ps}` : ''}</p>}
-            {group.map((s) => {
-              const r = rows[s.reg] || { present: true, scores: {} };
+      <div className="overflow-x-auto rounded-2xl bg-white shadow-sm ring-1 ring-slate-200">
+        <table className="w-full min-w-[900px] text-sm">
+          <thead className="sticky top-0 z-10 bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
+            <tr>
+              <th className="px-2 py-2 text-left font-semibold">#</th>
+              <th className="px-2 py-2 text-left font-semibold">Reg No</th>
+              <th className="px-2 py-2 text-left font-semibold">Student</th>
+              <th className="px-2 py-2 text-left font-semibold">Batch</th>
+              <th className="px-2 py-2 text-left font-semibold">Project</th>
+              {crit.map((c) => <th key={c.key} title={`${c.label} (max ${c.max})`} className="w-[92px] px-1 py-2 text-center text-[10px] font-semibold leading-tight">{c.label}<span className="block font-normal normal-case text-slate-400">max {c.max}</span></th>)}
+              <th className="px-2 py-2 text-center font-semibold">Total</th>
+              <th className="px-2 py-2 text-center font-semibold">P/A</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((s, i) => {
+              const r = rows[s.reg] || { present: true, scores: {}, project: '' };
               return (
-                <div key={s.reg} className={`rounded-2xl p-3.5 shadow-sm ring-1 ${r.present ? 'bg-white ring-slate-200' : 'bg-slate-50 ring-slate-200 opacity-80'}`}>
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0"><p className="truncate font-medium text-slate-800">{s.name}</p><p className="font-mono text-xs text-slate-400">{s.reg}</p></div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-bold tabular-nums text-slate-700">{totalOf(s.reg)}<span className="font-normal text-slate-400">/{room.maxTotal}</span></span>
-                      <button disabled={!editable} onClick={() => setRows({ ...rows, [s.reg]: { ...r, present: !r.present } })}
-                        className={`rounded-full px-3 py-1 text-xs font-bold ${r.present ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'} disabled:opacity-60`}>{r.present ? 'Present' : 'Absent'}</button>
-                    </div>
-                  </div>
-                  {r.present && (
-                    <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                      {crit.map((c) => (
-                        <label key={c.key} className="block">
-                          <span className="block truncate text-[11px] text-slate-500" title={c.label}>{c.label} <span className="text-slate-400">/{c.max}</span></span>
-                          <input type="number" inputMode="numeric" min={0} max={c.max} disabled={!editable} value={r.scores[c.key] ?? ''}
-                            onChange={(e) => setScore(s.reg, c.key, c.max, e.target.value)}
-                            className="w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm tabular-nums outline-none focus:border-teal-500 disabled:bg-slate-50" />
-                        </label>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                <tr key={s.reg} className={`border-t border-slate-100 ${r.present ? (i % 2 ? 'bg-slate-50/40' : '') : 'bg-rose-50/40 text-slate-400'}`}>
+                  <td className="px-2 py-1.5 text-xs text-slate-400">{i + 1}</td>
+                  <td className="px-2 py-1.5 font-mono text-xs text-slate-600">{s.reg}</td>
+                  <td className="max-w-[220px] truncate px-2 py-1.5 font-medium text-slate-800" title={s.name}>{s.name}</td>
+                  <td className="px-2 py-1.5 text-xs font-semibold text-teal-700">{s.batchNo || '—'}</td>
+                  <td className="px-2 py-1.5">
+                    <input value={r.project} disabled={!editable} placeholder="Project title"
+                      onChange={(e) => setRows({ ...rows, [s.reg]: { ...r, project: e.target.value } })}
+                      className="w-40 rounded-md border border-slate-200 px-2 py-1 text-xs outline-none focus:border-teal-500 disabled:bg-slate-50" />
+                  </td>
+                  {crit.map((c) => (
+                    <td key={c.key} className="px-1 py-1.5 text-center">
+                      <input type="number" inputMode="numeric" min={0} max={c.max} disabled={!editable || !r.present} value={r.scores[c.key] ?? ''}
+                        onChange={(e) => setScore(s.reg, c.key, c.max, e.target.value)}
+                        className="w-14 rounded-md border border-slate-300 px-1 py-1 text-center text-sm tabular-nums outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-100 disabled:bg-slate-50" />
+                    </td>
+                  ))}
+                  <td className="px-2 py-1.5 text-center text-sm font-bold tabular-nums text-slate-700">{totalOf(s.reg)}</td>
+                  <td className="px-2 py-1.5 text-center">
+                    <button disabled={!editable} onClick={() => setRows({ ...rows, [s.reg]: { ...r, present: !r.present } })}
+                      className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${r.present ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'} disabled:opacity-60`}>{r.present ? 'P' : 'A'}</button>
+                  </td>
+                </tr>
               );
             })}
-          </div>
-        );
-      })}
+          </tbody>
+        </table>
+        {!filtered.length && <p className="p-6 text-center text-sm text-slate-400">No student matches "{q}".</p>}
+      </div>
       {editable && (
         <div className="sticky bottom-3">
-          <button disabled={saving} onClick={saveReview} className="w-full rounded-xl bg-teal-600 py-3 font-bold text-white shadow-lg hover:bg-teal-700 disabled:opacity-50">{saving ? 'Saving…' : 'Save marks'}</button>
+          <button disabled={saving} onClick={saveReview} className="w-full rounded-xl bg-teal-600 py-3 font-bold text-white shadow-lg hover:bg-teal-700 disabled:opacity-50">{saving ? 'Saving…' : `Save marks (${done}/${room.students.length} done)`}</button>
         </div>
       )}
     </div>

@@ -531,15 +531,18 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
     const critMax = critMaxOf(await getRubric());
     const mine = new Set(c.students.map((s) => s.reg));
-    const now = new Date().toISOString(); let saved = 0;
+    const now = new Date().toISOString(); let saved = 0; const projects = [];
     for (const r of rows) {
       const reg = txt(r.reg, 64); if (!mine.has(reg)) continue;
+      if (typeof r.project === 'string') projects.push({ reg, project: txt(r.project, 2000) });
       const scores = {};
       for (const [k, v] of Object.entries(r.scores || {})) { if (critMax[k] == null) continue; const n = Math.round(Number(v)); if (!isNaN(n) && n >= 0) scores[k] = Math.min(n, critMax[k]); }
       const present = r.present !== false;
       await db.programScores.set({ sessionId: c.session.id, reg, programId: c.session.programId, room: c.room, present, scores: present ? scores : {}, total: present ? Object.values(scores).reduce((n, v) => n + v, 0) : 0, byEmp: c.me.key, postedAt: now });
       saved++;
     }
+    const changed = projects.filter((p) => (c.students.find((s) => s.reg === p.reg)?.project || '') !== p.project);
+    if (changed.length) await db.programStudents.setProjects(c.session.programId, changed);
     res.json({ ok: true, saved, postedAt: now });
   });
 }

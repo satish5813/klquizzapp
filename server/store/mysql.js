@@ -395,6 +395,10 @@ export async function makeMysqlDb() {
             [chunk.map((r) => [r.id, pid, r.reg, r.batchNo, r.reviewer])]);
         }
       },
+      // Project titles typed by the reviewing faculty: [{ reg, project }].
+      setProjects: async (pid, rows) => {
+        for (const r of rows) await q('UPDATE program_students SET project=? WHERE program_id=? AND reg=?', [String(r.project || '').slice(0, 2000), pid, String(r.reg)]);
+      },
     },
     facultyDir: {
       all: async () => (await q('SELECT * FROM faculty_directory')).map(toFac),
