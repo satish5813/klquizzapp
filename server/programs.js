@@ -396,6 +396,117 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     res.json({ ok: true, removed });
   });
 
+  /** Everything about one program in a single payload: attendance per session, review marks per
+   *  round, and per student / room / certification course summaries — the reports the admin
+   *  downloads once the hackathon is over. */
+  app.get('/api/admin/programs/:id/report', requireAdmin, async (req, res) => {
+    const program = await db.programs.get(req.params.id);
+    if (!program) return res.status(404).json({ error: 'Program not found' });
+    const students = (await db.programStudents.byProgram(program.id)).sort((a, b) => byNatural(roomKey(a.room), roomKey(b.room)) || byBatch(a, b));
+    const sessions = (await db.programSessions.byProgram(program.id)).sort((a, b) => String(a.date || a.createdAt).localeCompare(String(b.date || b.createdAt)));
+    const att = sessions.filter((s) => s.kind === 'attendance');
+    const rev = sessions.filter((s) => s.kind === 'review');
+    const rubric = await getRubric(); const critMax = critMaxOf(rubric);
+    const crit = []; rubric.tables.forEach((t, ti) => t.criteria.forEach((c, ci) => crit.push({ key: `t${ti}_c${ci}`, label: c.label, max: c.max })));
+    const maxTotal = crit.reduce((n, c) => n + c.max, 0);
+
+    // attendance: session → room → posting
+    const posts = new Map();
+    for (const s of att) posts.set(s.id, new Map((await db.programAttendance.bySession(s.id)).map((p) => [p.room, p])));
+    // review: session → reg → score
+    const marks = new Map();
+    for (const s of rev) marks.set(s.id, new Map((await db.programScores.bySession(s.id)).map((m) => [m.reg, m])));
+    const facNames = new Map(); for (const s of students) for (const f of rowFaculty(s)) facNames.set(f.key, f.name);
+    const roomFac = new Map(roomsOf(students).map((r) => [r.room, r.faculty.map((f) => f.name).join(', ')]));
+
+    const rows = students.map((s) => {
+      const room = roomKey(s.room);
+      const attendance = {}; let present = 0, posted = 0;
+      for (const a of att) {
+        const p = posts.get(a.id).get(room);
+        if (!p) { attendance[a.id] = ''; continue; }
+        posted++; const here = !!p.marks[s.reg]; if (here) present++;
+        attendance[a.id] = here ? 'P' : 'A';
+      }
+      const scores = {}; const totals = [];
+      for (const r of rev) {
+        const m = marks.get(r.id).get(s.reg);
+        if (!m) { scores[r.id] = null; continue; }
+        const outOf = Object.keys(m.scores || {}).reduce((n, k) => n + (critMax[k] || 0), 0);
+        const pct = m.present && outOf ? Math.round((m.total / outOf) * 100) : null;
+        scores[r.id] = { present: m.present, total: m.present ? m.total : 0, pct, grade: gradeOf(pct), scores: m.scores || {}, by: facNames.get(m.byEmp) || '' };
+        if (m.present) totals.push(m.total);
+      }
+      const best = totals.length ? Math.max(...totals) : null;
+      const avg = totals.length ? Math.round((totals.reduce((n, v) => n + v, 0) / totals.length) * 10) / 10 : null;
+      const avgPct = avg != null && maxTotal ? Math.round((avg / maxTotal) * 100) : null;
+      return {
+        reg: s.reg, name: s.name, branch: s.branch, section: s.section, room: s.room || '', roomKey: room,
+        courseCode: s.courseCode || '', courseName: s.courseName || '', batchNo: s.batchNo || '', project: s.project || '', ps: s.ps || '',
+        reviewer: facNames.get(s.reviewer) || '', faculty: roomFac.get(room) || '',
+        attendance, present, posted, attendancePct: posted ? Math.round((present / posted) * 100) : null,
+        scores, best, avg, avgPct, grade: gradeOf(avgPct), scored: totals.length, reviewed: Object.values(scores).filter(Boolean).length,
+      };
+    });
+
+    // group summaries (per certification course, per room, per session)
+    const group = (keyOf, labelOf) => {
+      const m = new Map();
+      for (const r of rows) {
+        const k = keyOf(r); if (k == null) continue;
+        const e = m.get(k) || { key: k, label: labelOf(r), students: 0, present: 0, posted: 0, reviewed: 0, marked: 0, totalSum: 0, best: [], grades: { Outstanding: 0, Good: 0, Average: 0, 'Needs Improvement': 0 } };
+        e.students++; e.present += r.present; e.posted += r.posted;
+        if (r.reviewed) e.reviewed++;
+        // averages and grades come from the students actually marked, not the ones marked absent
+        if (r.avg != null) { e.marked++; e.totalSum += r.avg; e.best.push(r.best || 0); if (e.grades[r.grade] != null) e.grades[r.grade]++; }
+        m.set(k, e);
+      }
+      return [...m.values()].map((e) => ({
+        key: e.key, label: e.label, students: e.students,
+        attendancePct: e.posted ? Math.round((e.present / e.posted) * 100) : null,
+        scored: e.reviewed, marked: e.marked, avgMarks: e.marked ? Math.round((e.totalSum / e.marked) * 10) / 10 : null,
+        avgPct: e.marked && maxTotal ? Math.round((e.totalSum / e.marked / maxTotal) * 100) : null,
+        topMarks: e.best.length ? Math.max(...e.best) : null, grades: e.grades,
+      })).sort((a, b) => byNatural(a.key, b.key));
+    };
+
+    const perSession = [
+      ...att.map((s) => {
+        const map = posts.get(s.id);
+        const mine = rows.filter((r) => map.has(r.roomKey));
+        const present = mine.reduce((n, r) => n + (r.attendance[s.id] === 'P' ? 1 : 0), 0);
+        return { id: s.id, kind: 'attendance', name: s.name, date: s.date, startTime: s.startTime, endTime: s.endTime, rooms: roomsOf(students).length, roomsPosted: map.size, students: students.length, covered: mine.length, present, absent: mine.length - present, pct: mine.length ? Math.round((present / mine.length) * 100) : null };
+      }),
+      ...rev.map((s) => {
+        const map = marks.get(s.id);
+        const scored = [...map.values()];
+        const marked = scored.filter((m) => m.present);
+        return { id: s.id, kind: 'review', name: s.name, date: s.date, startTime: s.startTime, endTime: s.endTime, students: students.length, scored: scored.length, present: marked.length, absent: scored.length - marked.length, avgMarks: marked.length ? Math.round((marked.reduce((n, m) => n + m.total, 0) / marked.length) * 10) / 10 : null, maxTotal, batches: new Set(students.filter((x) => x.batchNo).map((x) => `${roomKey(x.room)}|${x.batchNo}`)).size };
+      }),
+    ];
+
+    const reviewedRows = rows.filter((r) => r.reviewed);
+    const markedRows = rows.filter((r) => r.avg != null);
+    res.json({
+      program, generatedAt: new Date().toISOString(), maxTotal, criteria: crit,
+      sessions: { attendance: att.map((s) => ({ id: s.id, name: s.name, date: s.date, startTime: s.startTime, endTime: s.endTime })), review: rev.map((s) => ({ id: s.id, name: s.name, date: s.date, startTime: s.startTime, endTime: s.endTime })) },
+      students: rows, perSession,
+      courses: group((r) => r.courseCode || '(no course)', (r) => r.courseName || ''),
+      rooms: group((r) => r.roomKey, (r) => r.faculty),
+      branches: group((r) => r.branch || '(none)', () => ''),
+      summary: {
+        students: rows.length, rooms: new Set(rows.map((r) => r.roomKey)).size, courses: new Set(rows.map((r) => r.courseCode).filter(Boolean)).size,
+        batches: new Set(students.filter((s) => s.batchNo).map((s) => `${roomKey(s.room)}|${s.batchNo}`)).size,
+        attendanceSessions: att.length, reviewRounds: rev.length,
+        present: rows.reduce((n, r) => n + r.present, 0), posted: rows.reduce((n, r) => n + r.posted, 0),
+        attendancePct: rows.reduce((n, r) => n + r.posted, 0) ? Math.round((rows.reduce((n, r) => n + r.present, 0) / rows.reduce((n, r) => n + r.posted, 0)) * 100) : null,
+        scored: reviewedRows.length, marked: markedRows.length, absentInReview: reviewedRows.length - markedRows.length,
+        avgMarks: markedRows.length ? Math.round((markedRows.reduce((n, r) => n + (r.avg || 0), 0) / markedRows.length) * 10) / 10 : null,
+        maxTotal, grades: markedRows.reduce((g, r) => ({ ...g, [r.grade]: (g[r.grade] || 0) + 1 }), {}),
+      },
+    });
+  });
+
   /** Flat rows for an Excel export of one session. */
   app.get('/api/admin/program-sessions/:sid/export', requireAdmin, async (req, res) => {
     const ctx = await loadSession(req, res); if (!ctx) return;
