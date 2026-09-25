@@ -10,6 +10,7 @@ interface Stu { reg: string; name: string; branch: string; section: string; batc
 interface Crit { label: string; max: number; bands: string[]; }
 interface RoomRes { program: { id: string; title: string }; session: { id: string; name: string; date: string; startTime: string; endTime: string }; room: string; label: string; open: boolean; posting?: { postedAt: string; present: number; absent: number; total: number; by: string } | null; students: Stu[]; rubric?: { bandLabels: string[]; tables: { name: string; criteria: Crit[] }[] }; maxTotal?: number; }
 
+interface RowState { present: boolean; scores: Record<string, number>; project: string; batchNo: string; }
 const when = (c: { date: string; startTime: string; endTime: string }) => [c.date ? new Date(c.date + 'T00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '', c.startTime && c.endTime ? `${c.startTime}–${c.endTime}` : c.startTime].filter(Boolean).join(' · ');
 
 export default function FacultyRooms({ kind }: { kind: Kind }) {
@@ -22,7 +23,7 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
   const [data, setData] = useState<LoginRes | null>(null);
   const [room, setRoom] = useState<RoomRes | null>(null);
   const [marks, setMarks] = useState<Record<string, boolean>>({});
-  const [rows, setRows] = useState<Record<string, { present: boolean; scores: Record<string, number>; project: string }>>({});
+  const [rows, setRows] = useState<Record<string, RowState>>({});
   const [q, setQ] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -89,7 +90,7 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
       setRoom(r);
       if (isReview) {
         const init: typeof rows = {};
-        for (const s of r.students) init[s.reg] = { present: s.present !== false, scores: { ...(s.scores || {}) }, project: s.project || '' };
+        for (const s of r.students) init[s.reg] = { present: s.present !== false, scores: { ...(s.scores || {}) }, project: s.project || '', batchNo: s.batchNo || '' };
         setRows(init);
       } else {
         const init: Record<string, boolean> = {};
@@ -118,8 +119,8 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
     try {
       // only the students you actually touched — the rest stay "not scored"
       const payload = Object.entries(rows)
-        .filter(([, r]) => !r.present || Object.keys(r.scores || {}).length > 0 || (r.project || '').trim())
-        .map(([reg, r]) => ({ reg, present: r.present, scores: r.scores, project: r.project }));
+        .filter(([, r]) => !r.present || Object.keys(r.scores || {}).length > 0 || (r.project || '').trim() || (r.batchNo || '').trim())
+        .map(([reg, r]) => ({ reg, present: r.present, scores: r.scores, project: r.project, batchNo: r.batchNo }));
       const res = await call<{ saved: number; postedAt: string }>('/api/faculty/program/review', { sessionId: room.session.id, room: room.room, rows: payload });
       await openRoom({ sessionId: room.session.id, room: room.room });
       setNote(`Saved ${res.saved} student(s) at ${new Date(res.postedAt).toLocaleTimeString('en-IN')} ✓ — you can keep editing while the room is open.`);
@@ -253,7 +254,10 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
     );
   }
 
-  // ---------- Room: review marks (one row per student, batch rows merged, band chips) ----------
+  // ---------- Room: review marks ----------
+  // No pre-made batches: the faculty types a batch number against each student as a team
+  // presents (3–4 members share one number). Rows regroup under that batch automatically and
+  // the team's project title is typed once for the whole batch.
   const crit = (room.rubric?.tables || []).flatMap((t, ti) => t.criteria.map((c, ci) => ({ key: `t${ti}_c${ci}`, ...c })));
   const bands = room.rubric?.bandLabels?.length ? room.rubric.bandLabels : ['Poor', 'Below Avg', 'Good', 'Excellent'];
   // one chip per rubric band (plus 0) — e.g. a criterion out of 10 → 0 · 3 · 5 · 8 · 10
@@ -263,12 +267,24 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
     return out;
   };
   const editable = room.open;
-  const totalOf = (reg: string) => (rows[reg]?.present ? Object.values(rows[reg].scores || {}).reduce((n, v) => n + (Number(v) || 0), 0) : 0);
+  const row = (reg: string) => rows[reg] || { present: true, scores: {}, project: '', batchNo: '' };
+  const patch = (reg: string, p: Partial<RowState>) => setRows((r) => ({ ...r, [reg]: { ...row(reg), ...p } }));
+  const totalOf = (reg: string) => (row(reg).present ? Object.values(row(reg).scores || {}).reduce((n, v) => n + (Number(v) || 0), 0) : 0);
   const setScore = (reg: string, key: string, v: number) =>
-    setRows((r) => { const cur = r[reg] || { present: true, scores: {}, project: '' }; const scores = { ...cur.scores }; if (scores[key] === v) delete scores[key]; else scores[key] = v; return { ...r, [reg]: { ...cur, scores } }; });
-  const isDone = (s: Stu) => rows[s.reg]?.present === false || Object.keys(rows[s.reg]?.scores || {}).length >= crit.length;
+    setRows((r) => { const cur = r[reg] || { present: true, scores: {}, project: '', batchNo: '' }; const scores = { ...cur.scores }; if (scores[key] === v) delete scores[key]; else scores[key] = v; return { ...r, [reg]: { ...cur, scores } }; });
+  const isDone = (s: Stu) => row(s.reg).present === false || Object.keys(row(s.reg).scores || {}).length >= crit.length;
   const done = room.students.filter(isDone).length;
-  // a colour per rubric criterion, so each column reads at a glance
+  // typing a batch number joins that student to the team: same project title, grouped together
+  const setBatch = (reg: string, v: string) => {
+    const b = v.toUpperCase().trim();
+    const mate = b ? room.students.find((s) => s.reg !== reg && row(s.reg).batchNo === b && row(s.reg).project) : null;
+    patch(reg, { batchNo: b, ...(mate ? { project: row(mate.reg).project } : {}) });
+  };
+  const setProject = (reg: string, v: string) => {
+    const b = row(reg).batchNo;
+    if (!b) return patch(reg, { project: v });
+    setRows((r) => { const next = { ...r }; for (const s of room.students) if ((next[s.reg]?.batchNo || '') === b) next[s.reg] = { ...next[s.reg], project: v }; return next; });
+  };
   const TONE = [
     { head: 'bg-teal-50 text-teal-800', on: 'bg-teal-600 text-white ring-teal-600', off: 'text-teal-700 ring-teal-200 hover:bg-teal-50' },
     { head: 'bg-indigo-50 text-indigo-800', on: 'bg-indigo-600 text-white ring-indigo-600', off: 'text-indigo-700 ring-indigo-200 hover:bg-indigo-50' },
@@ -279,13 +295,14 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
     { head: 'bg-violet-50 text-violet-800', on: 'bg-violet-600 text-white ring-violet-600', off: 'text-violet-700 ring-violet-200 hover:bg-violet-50' },
     { head: 'bg-orange-50 text-orange-800', on: 'bg-orange-500 text-white ring-orange-500', off: 'text-orange-700 ring-orange-200 hover:bg-orange-50' },
   ];
-  // students of one batch stay together as one block
+  // batched students first (grouped, natural order), then the ones still waiting
   const groups: { batch: string; list: Stu[] }[] = [];
-  for (const s of filtered) {
-    const b = s.batchNo || '—';
-    const g = groups[groups.length - 1];
-    if (g && g.batch === b) g.list.push(s); else groups.push({ batch: b, list: [s] });
-  }
+  const keyed = filtered.map((s) => ({ s, b: row(s.reg).batchNo }));
+  const bats = [...new Set(keyed.filter((k) => k.b).map((k) => k.b))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  for (const b of bats) groups.push({ batch: b, list: keyed.filter((k) => k.b === b).map((k) => k.s) });
+  const waiting = keyed.filter((k) => !k.b).map((k) => k.s);
+  if (waiting.length) groups.push({ batch: '', list: waiting });
+  const cols = 5 + crit.length;
   return (
     <div className="space-y-3 pb-16">
       {header}
@@ -295,11 +312,14 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
             <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{room.program.title}</p>
             <h2 className="text-lg font-bold text-slate-800">Room {room.label} · {room.session.name}</h2>
           </div>
+          <span className="rounded-full bg-teal-50 px-3 py-1 text-sm font-semibold text-teal-700 ring-1 ring-teal-200">{bats.length} batches</span>
           <span className="rounded-full bg-slate-100 px-3 py-1 text-sm font-semibold text-slate-700">{done}/{room.students.length} done</span>
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search reg no / name / batch"
             className="w-56 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-teal-500" />
         </div>
-        <p className="mt-1 text-sm text-slate-500">{editable ? `Tap a mark for each heading (max ${room.maxTotal}). Tap it again to clear. Save anytime — you can edit until the room is closed.` : 'This room is closed — marks are read-only.'}</p>
+        <p className="mt-1 text-sm text-slate-500">{editable
+          ? `Type the same batch number (1, 2, 3…) for the 3–4 members of a team — they group together on their own. Type the project title once per batch and tap a mark for each heading (max ${room.maxTotal}).`
+          : 'This room is closed — marks are read-only.'}</p>
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Marks scale</span>
           {bands.map((b) => <span key={b} className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">{b}</span>)}
@@ -314,65 +334,79 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
               <th className="px-2 py-2 text-left font-semibold">Batch</th>
               <th className="px-2 py-2 text-left font-semibold">Reg No</th>
               <th className="px-2 py-2 text-left font-semibold">Student</th>
-              <th className="px-2 py-2 text-left font-semibold">Project</th>
               {crit.map((c, i) => <th key={c.key} title={`${c.label} (max ${c.max})`} className={`px-2 py-2 text-center text-[10px] font-semibold leading-tight ${TONE[i % TONE.length].head}`}>{c.label}<span className="block font-normal normal-case opacity-70">max {c.max}</span></th>)}
               <th className="px-2 py-2 text-center font-semibold">Total</th>
               <th className="px-2 py-2 text-center font-semibold">P/A</th>
             </tr>
           </thead>
-          {groups.map((g, gi) => (
-            <tbody key={g.batch + gi} className={`border-t-4 border-slate-100 ${gi % 2 ? 'bg-slate-50/50' : ''}`}>
-              {g.list.map((s, ri) => {
-                const r = rows[s.reg] || { present: true, scores: {}, project: '' };
-                const t = totalOf(s.reg);
-                return (
-                  <tr key={s.reg} className={`border-t border-slate-100 ${r.present ? '' : 'bg-rose-50/50 text-slate-400'}`}>
-                    {ri === 0 && (
-                      <td rowSpan={g.list.length} className="border-r border-slate-100 px-2 py-1.5 align-middle">
-                        <span className="rounded-lg bg-teal-600 px-2 py-1 text-xs font-bold text-white">{g.batch}</span>
-                        <span className="mt-1 block text-[10px] text-slate-400">{g.list.length} students</span>
+          {groups.map((g) => {
+            const marked = g.list.filter((s) => row(s.reg).present && Object.keys(row(s.reg).scores || {}).length);
+            const avg = marked.length ? Math.round((marked.reduce((n, s) => n + totalOf(s.reg), 0) / marked.length) * 10) / 10 : null;
+            return (
+              <tbody key={g.batch || 'none'} className="border-t-4 border-slate-100">
+                <tr className={g.batch ? 'bg-teal-50/70' : 'bg-slate-50'}>
+                  <td colSpan={cols} className="px-2 py-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {g.batch
+                        ? <span className="rounded-lg bg-teal-600 px-2.5 py-1 text-xs font-bold text-white">BATCH {g.batch}</span>
+                        : <span className="rounded-lg bg-slate-200 px-2.5 py-1 text-xs font-bold text-slate-600">NO BATCH YET</span>}
+                      <span className="text-xs text-slate-500">{g.list.length} student{g.list.length === 1 ? '' : 's'}</span>
+                      {g.batch && (
+                        <input value={row(g.list[0].reg).project} disabled={!editable} placeholder="Project title (applies to the whole batch)"
+                          onChange={(e) => setProject(g.list[0].reg, e.target.value)}
+                          className="w-72 rounded-md border border-teal-200 bg-white px-2 py-1 text-xs outline-none focus:border-teal-500 disabled:bg-transparent" />
+                      )}
+                      {g.batch
+                        ? avg != null && <span className="ml-auto rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-teal-700 ring-1 ring-teal-200">Batch average {avg}/{room.maxTotal} · {marked.length}/{g.list.length} marked</span>
+                        : <span className="ml-auto text-xs text-slate-400">Type a batch number against a team's members to group them here</span>}
+                    </div>
+                  </td>
+                </tr>
+                {g.list.map((s) => {
+                  const r = row(s.reg);
+                  return (
+                    <tr key={s.reg} className={`border-t border-slate-100 ${r.present ? '' : 'bg-rose-50/50 text-slate-400'}`}>
+                      <td className="px-2 py-1.5">
+                        <input value={r.batchNo} disabled={!editable} placeholder="—" inputMode="text" maxLength={8}
+                          onChange={(e) => setBatch(s.reg, e.target.value)}
+                          className="w-14 rounded-md border border-slate-300 px-1 py-1 text-center text-xs font-bold uppercase text-teal-700 outline-none focus:border-teal-500 disabled:bg-transparent" />
                       </td>
-                    )}
-                    <td className="px-2 py-1.5 font-mono text-xs text-slate-600">{s.reg}</td>
-                    <td className="max-w-[210px] truncate px-2 py-1.5 font-medium text-slate-800" title={s.name}>{s.name}</td>
-                    <td className="px-2 py-1.5">
-                      <input value={r.project} disabled={!editable} placeholder="Project title"
-                        onChange={(e) => setRows({ ...rows, [s.reg]: { ...r, project: e.target.value } })}
-                        className="w-36 rounded-md border border-slate-200 px-2 py-1 text-xs outline-none focus:border-teal-500 disabled:bg-transparent" />
-                    </td>
-                    {crit.map((c, i) => {
-                      const tone = TONE[i % TONE.length];
-                      return (
-                        <td key={c.key} className="px-1.5 py-1.5">
-                          <div className="flex justify-center gap-0.5">
-                            {choicesOf(c.max).map((o) => {
-                              const on = r.scores[c.key] === o.v;
-                              return (
-                                <button key={o.v} type="button" disabled={!editable || !r.present} title={`${o.band} — ${o.v}/${c.max}`}
-                                  onClick={() => setScore(s.reg, c.key, o.v)}
-                                  className={`h-6 w-6 rounded-md text-[11px] font-bold ring-1 transition disabled:opacity-40 ${on ? tone.on : `bg-white ${tone.off}`}`}>{o.v}</button>
-                              );
-                            })}
-                          </div>
-                        </td>
-                      );
-                    })}
-                    <td className={`px-2 py-1.5 text-center text-sm font-bold tabular-nums ${isDone(s) && r.present ? 'text-teal-700' : 'text-slate-400'}`}>{t}</td>
-                    <td className="px-2 py-1.5 text-center">
-                      <button disabled={!editable} onClick={() => setRows({ ...rows, [s.reg]: { ...r, present: !r.present } })}
-                        className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${r.present ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'} disabled:opacity-60`}>{r.present ? 'P' : 'A'}</button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          ))}
+                      <td className="px-2 py-1.5 font-mono text-xs text-slate-600">{s.reg}</td>
+                      <td className="max-w-[240px] truncate px-2 py-1.5 font-medium text-slate-800" title={s.name}>{s.name}</td>
+                      {crit.map((c, i) => {
+                        const tone = TONE[i % TONE.length];
+                        return (
+                          <td key={c.key} className="px-1.5 py-1.5">
+                            <div className="flex justify-center gap-0.5">
+                              {choicesOf(c.max).map((o) => {
+                                const on = r.scores[c.key] === o.v;
+                                return (
+                                  <button key={o.v} type="button" disabled={!editable || !r.present} title={`${o.band} — ${o.v}/${c.max}`}
+                                    onClick={() => setScore(s.reg, c.key, o.v)}
+                                    className={`h-6 w-6 rounded-md text-[11px] font-bold ring-1 transition disabled:opacity-40 ${on ? tone.on : `bg-white ${tone.off}`}`}>{o.v}</button>
+                                );
+                              })}
+                            </div>
+                          </td>
+                        );
+                      })}
+                      <td className={`px-2 py-1.5 text-center text-sm font-bold tabular-nums ${isDone(s) && r.present ? 'text-teal-700' : 'text-slate-400'}`}>{totalOf(s.reg)}<span className="font-normal text-slate-400">/{room.maxTotal}</span></td>
+                      <td className="px-2 py-1.5 text-center">
+                        <button disabled={!editable} onClick={() => patch(s.reg, { present: !r.present })}
+                          className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${r.present ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'} disabled:opacity-60`}>{r.present ? 'P' : 'A'}</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            );
+          })}
         </table>
         {!filtered.length && <p className="p-6 text-center text-sm text-slate-400">No student matches "{q}".</p>}
       </div>
       {editable && (
         <div className="sticky bottom-3">
-          <button disabled={saving} onClick={saveReview} className="w-full rounded-xl bg-teal-600 py-3 font-bold text-white shadow-lg hover:bg-teal-700 disabled:opacity-50">{saving ? 'Saving…' : `Save marks (${done}/${room.students.length} done)`}</button>
+          <button disabled={saving} onClick={saveReview} className="w-full rounded-xl bg-teal-600 py-3 font-bold text-white shadow-lg hover:bg-teal-700 disabled:opacity-50">{saving ? 'Saving…' : `Save (${bats.length} batches · ${done}/${room.students.length} students done)`}</button>
         </div>
       )}
     </div>

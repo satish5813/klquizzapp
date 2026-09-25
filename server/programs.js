@@ -122,7 +122,8 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
 
   const critMaxOf = (rubric) => { const m = {}; rubric.tables.forEach((t, ti) => t.criteria.forEach((c, ci) => { m[`t${ti}_c${ci}`] = c.max; })); return m; };
   const gradeOf = (p) => (p == null ? '' : p >= 85 ? 'Outstanding' : p >= 70 ? 'Good' : p >= 50 ? 'Average' : 'Needs Improvement');
-  const byBatch = (a, b) => byNatural(a.batchNo, b.batchNo) || byNatural(a.reg, b.reg);
+  // batched students first (teams already reviewed), then those still waiting for a batch
+  const byBatch = (a, b) => (!!b.batchNo - !!a.batchNo) || byNatural(a.batchNo, b.batchNo) || byNatural(a.reg, b.reg);
   const dirMap = async () => new Map((await db.facultyDir.all()).map((f) => [f.key, f]));
   async function loadSession(req, res) {
     const session = await db.programSessions.get(req.params.sid);
@@ -198,20 +199,26 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     const size = Math.max(2, Math.min(10, Number(req.body?.batchSize) || await batchSizeOf(p.id)));
     await db.settings.set(`program_batch_size:${p.id}`, size);
     const r = await db.programStudents.importMany(p.id, rows, !!req.body?.replace);
-    const b = await rebuildBatches(p.id, size);
-    const rooms = roomsOf(await db.programStudents.byProgram(p.id));
-    res.json({ ...r, skipped, batchSize: size, batches: b.batches, rooms: rooms.length, roomsWithoutFaculty: rooms.filter((x) => !x.faculty.length).map((x) => x.label) });
+    // batches are normally formed live by the faculty during the review; autoBatch=true
+    // pre-splits each room into groups of `size` instead.
+    if (req.body?.autoBatch) await rebuildBatches(p.id, size);
+    const all = await db.programStudents.byProgram(p.id);
+    const rooms = roomsOf(all);
+    res.json({ ...r, skipped, batchSize: size, batches: new Set(all.filter((s) => s.batchNo).map((s) => `${roomKey(s.room)}|${s.batchNo}`)).size, rooms: rooms.length, roomsWithoutFaculty: rooms.filter((x) => !x.faculty.length).map((x) => x.label) });
   });
 
-  /** Rebuild batches (e.g. with a new size). reset=true clears auto-made batch numbers first. */
+  /** Batches: { clear: true } empties them (faculty then form batches live during the review),
+   *  otherwise they are rebuilt in groups of `batchSize` (reset=true re-does the auto ones). */
   app.post('/api/admin/programs/:id/batches', requireAdmin, async (req, res) => {
     const p = await db.programs.get(req.params.id);
     if (!p) return res.status(404).json({ error: 'Program not found' });
     const size = Math.max(2, Math.min(10, Number(req.body?.batchSize) || await batchSizeOf(p.id)));
     await db.settings.set(`program_batch_size:${p.id}`, size);
-    if (req.body?.reset) {
-      const auto = (await db.programStudents.byProgram(p.id)).filter((s) => /^B\d+$/.test(s.batchNo));
-      if (auto.length) await db.programStudents.setBatches(p.id, auto.map((s) => ({ id: s.id, reg: s.reg, batchNo: '', reviewer: '' })));
+    if (req.body?.clear || req.body?.reset) {
+      const all = await db.programStudents.byProgram(p.id);
+      const wipe = req.body?.clear ? all.filter((s) => s.batchNo || s.reviewer) : all.filter((s) => /^B\d+$/.test(s.batchNo));
+      if (wipe.length) await db.programStudents.setBatches(p.id, wipe.map((s) => ({ id: s.id, reg: s.reg, batchNo: '', reviewer: '' })));
+      if (req.body?.clear) return res.json({ batchSize: size, batches: 0, cleared: wipe.length });
     }
     res.json({ batchSize: size, ...(await rebuildBatches(p.id, size)) });
   });
@@ -460,10 +467,10 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
       const sessions = (await db.programSessions.byProgram(program.id)).filter((s) => s.kind === kind);
       if (!sessions.length) continue;
       const roster = await db.programStudents.byProgram(program.id);
-      const mine = new Map(); // room -> my students (review) / all room students (attendance)
+      const mine = new Map(); // room -> its students (a room's faculty handle the whole room)
       for (const r of roomsOf(roster)) {
         const inRoom = roster.filter((s) => roomKey(s.room) === r.room);
-        if (kind === 'attendance' ? r.faculty.some((f) => f.key === me.key) : inRoom.some((s) => s.reviewer === me.key)) mine.set(r.room, kind === 'attendance' ? inRoom : inRoom.filter((s) => s.reviewer === me.key));
+        if (r.faculty.some((f) => f.key === me.key) || inRoom.some((s) => s.reviewer === me.key)) mine.set(r.room, inRoom);
       }
       if (!mine.size) continue;
       for (const session of sessions) {
@@ -472,7 +479,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
         for (const [room, list] of mine) {
           const r = status.get(room);
           const myScored = scored ? list.filter((s) => scored.has(s.reg)).length : 0;
-          cards.push({ programId: program.id, programTitle: program.title, sessionId: session.id, sessionName: session.name, date: session.date, startTime: session.startTime, endTime: session.endTime, room, label: r.label, students: list.length, batches: new Set(list.map((s) => s.batchNo)).size, open: r.open, posted: kind === 'attendance' ? r.posted : myScored > 0 && myScored >= list.length, present: r.present || 0, absent: r.absent || 0, scored: myScored, postedAt: r.postedAt });
+          cards.push({ programId: program.id, programTitle: program.title, sessionId: session.id, sessionName: session.name, date: session.date, startTime: session.startTime, endTime: session.endTime, room, label: r.label, students: list.length, batches: new Set(list.filter((s) => s.batchNo).map((s) => s.batchNo)).size, open: r.open, posted: kind === 'attendance' ? r.posted : myScored > 0 && myScored >= list.length, present: r.present || 0, absent: r.absent || 0, scored: myScored, postedAt: r.postedAt });
         }
       }
     }
@@ -481,17 +488,17 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     res.json({ faculty: { name: me.name }, kind, cards });
   });
 
-  /** Verify this faculty may act on the room; review → only their assigned batches. */
+  /** Verify this faculty may act on the room. A room's faculty see all of its students —
+   *  for a review they group them into batches themselves as the teams present. */
   async function facultyRoom(req, res) {
     const me = await authFaculty(req, res); if (!me) return null;
     const room = roomKey(req.body?.room);
     const session = await db.programSessions.get(String(req.body?.sessionId || ''));
     if (!session) { res.status(400).json({ error: 'Missing session.' }); return null; }
-    const inRoom = (await db.programStudents.byProgram(session.programId)).filter((s) => roomKey(s.room) === room).sort(byBatch);
-    const info = roomsOf(inRoom)[0];
-    const students = session.kind === 'review' ? inRoom.filter((s) => s.reviewer === me.key) : inRoom;
-    const allowed = session.kind === 'review' ? students.length > 0 : !!info?.faculty.some((f) => f.key === me.key);
-    if (!allowed) { res.status(403).json({ error: session.kind === 'review' ? 'No batches in this room are assigned to you.' : 'This room is not assigned to you.' }); return null; }
+    const students = (await db.programStudents.byProgram(session.programId)).filter((s) => roomKey(s.room) === room).sort(byBatch);
+    const info = roomsOf(students)[0];
+    const mine = session.kind === 'review' && students.some((s) => s.reviewer === me.key);
+    if (!info?.faculty.some((f) => f.key === me.key) && !mine) { res.status(403).json({ error: 'This room is not assigned to you.' }); return null; }
     return { me, room, session, program: await db.programs.get(session.programId), students, label: info?.label || room, open: (session.openRooms || []).includes(room) };
   }
 
@@ -523,7 +530,9 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     res.json({ ok: true, present, absent: rec.absent, total: rec.total, postedAt: rec.postedAt });
   });
 
-  /** Save review marks for YOUR assigned students (re-savable while the room is open). */
+  /** Save review marks for the room (re-savable while the room is open). Rows may also carry
+   *  the batch number and project title the faculty typed — students sharing a batch number
+   *  in this room form one team, and the team's project title is copied to all its members. */
   app.post('/api/faculty/program/review', async (req, res) => {
     const c = await facultyRoom(req, res); if (!c) return;
     if (c.session.kind !== 'review') return res.status(400).json({ error: 'This is not a review session.' });
@@ -531,18 +540,34 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
     const critMax = critMaxOf(await getRubric());
     const mine = new Set(c.students.map((s) => s.reg));
-    const now = new Date().toISOString(); let saved = 0; const projects = [];
+    const now = new Date().toISOString(); let saved = 0; const projects = []; const batches = new Map();
     for (const r of rows) {
       const reg = txt(r.reg, 64); if (!mine.has(reg)) continue;
       if (typeof r.project === 'string') projects.push({ reg, project: txt(r.project, 2000) });
+      if (typeof r.batchNo === 'string') batches.set(reg, txt(r.batchNo, 32).toUpperCase());
       const scores = {};
       for (const [k, v] of Object.entries(r.scores || {})) { if (critMax[k] == null) continue; const n = Math.round(Number(v)); if (!isNaN(n) && n >= 0) scores[k] = Math.min(n, critMax[k]); }
       const present = r.present !== false;
       await db.programScores.set({ sessionId: c.session.id, reg, programId: c.session.programId, room: c.room, present, scores: present ? scores : {}, total: present ? Object.values(scores).reduce((n, v) => n + v, 0) : 0, byEmp: c.me.key, postedAt: now });
       saved++;
     }
-    const changed = projects.filter((p) => (c.students.find((s) => s.reg === p.reg)?.project || '') !== p.project);
+    // batch numbers typed during the review (the faculty who typed them becomes the reviewer)
+    const byId = new Map(c.students.map((s) => [s.reg, s]));
+    const newBatch = [...batches.entries()].filter(([reg, b]) => (byId.get(reg).batchNo || '') !== b)
+      .map(([reg, b]) => ({ id: byId.get(reg).id, reg, batchNo: b, reviewer: b ? c.me.key : '' }));
+    if (newBatch.length) await db.programStudents.setBatches(c.session.programId, newBatch);
+    // one project title per team: copy it to every member of the same batch in this room
+    const teamProject = new Map();
+    for (const p of projects) { const b = batches.get(p.reg) ?? byId.get(p.reg).batchNo; if (b && p.project) teamProject.set(b, p.project); }
+    for (const s of c.students) {
+      const b = batches.get(s.reg) ?? s.batchNo;
+      if (!b || !teamProject.has(b)) continue;
+      const own = projects.find((p) => p.reg === s.reg);
+      if (!own) projects.push({ reg: s.reg, project: teamProject.get(b) });
+      else if (!own.project) own.project = teamProject.get(b); // a blank member keeps the team's title
+    }
+    const changed = projects.filter((p) => (byId.get(p.reg)?.project || '') !== p.project);
     if (changed.length) await db.programStudents.setProjects(c.session.programId, changed);
-    res.json({ ok: true, saved, postedAt: now });
+    res.json({ ok: true, saved, batched: newBatch.length, postedAt: now });
   });
 }
