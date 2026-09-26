@@ -133,7 +133,8 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
   if (!data) {
     return (
       <div className="mx-auto max-w-sm rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-        <h1 className="text-xl font-bold text-slate-800">{isReview ? 'Hackathon Review' : 'Room Attendance'}</h1>
+        <h1 className="text-xl font-bold text-slate-800">Skill Palaver</h1>
+        <p className="text-sm font-semibold text-teal-700">{isReview ? 'Hackathon review' : 'Room attendance'}</p>
         {otpMode === null ? <p className="mt-3 text-sm text-slate-400">Loading…</p> : otpSent ? (
           <form onSubmit={(e) => { e.preventDefault(); verifyOtp(); }} className="mt-4 space-y-3">
             <p className="text-sm text-slate-600">We sent a 6-digit code to <b>{otpSent}</b>. It is valid for 10 minutes (check Junk/Spam too).</p>
@@ -166,7 +167,7 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h1 className="text-lg font-bold">{data.faculty.name || 'Faculty'}</h1>
-          <p className="text-sm text-teal-50/90">{isReview ? 'Hackathon review' : 'Room attendance'}</p>
+          <p className="text-sm text-teal-50/90">Skill Palaver · {isReview ? 'Hackathon review' : 'Room attendance'}</p>
         </div>
         <div className="flex items-center gap-2">
           {room && <button onClick={back} className="rounded-lg bg-white/15 px-3 py-1.5 text-sm font-semibold hover:bg-white/25">← My rooms</button>}
