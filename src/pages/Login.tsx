@@ -54,7 +54,7 @@ export default function Login() {
             <Logo src="/logo-right.png" fallback="SKILL" />
           </div>
           <h1 className="mt-5 text-2xl font-bold tracking-tight text-white">Student Login</h1>
-          <p className="mt-1 text-sm text-teal-50/90">KL AI QuizApp · Online Examination</p>
+          <p className="mt-1 text-sm text-teal-50/90">KL Skill Palaver · Online Examination</p>
         </div>
 
         {/* form sits slightly over the band */}

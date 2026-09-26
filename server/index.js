@@ -16,7 +16,7 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'change-me-admin';
 const MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
 const QUIZ_SIZE = Number(process.env.QUIZ_SIZE || 60);
 const QUIZ_DURATION_MIN = Number(process.env.QUIZ_DURATION_MIN || 90);
-const APP_NAME = 'KL AI QuizApp';
+const APP_NAME = 'KL Skill Palaver';
 
 const db = await initStore();
 

@@ -38,8 +38,8 @@ export default function App() {
         <div className={`mx-auto flex ${shell} items-center justify-between gap-3 px-4 py-2.5`}>
           <Logo src="/logo-left.png" fallback="KL" />
           <Link to="/" className="text-center leading-tight">
-            <div className="text-base font-bold tracking-tight text-slate-800">{wide ? 'Skill Palaver' : 'KL AI QuizApp'}</div>
-            <div className="text-[10px] font-semibold uppercase tracking-[0.25em] text-teal-600">{wide ? 'KL Skill Development' : 'Online Examination'}</div>
+            <div className="text-base font-bold tracking-tight text-slate-800">{wide ? 'Skill Palaver' : 'KL Skill Palaver'}</div>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.25em] text-teal-600">KL Skill Development</div>
           </Link>
           <Logo src="/logo-right.png" fallback="SKILL" />
         </div>

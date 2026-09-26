@@ -65,7 +65,7 @@ export default function Result() {
             {branch && <>Branch <b className="text-slate-700">{branch}</b></>}{section && <> · Section <b className="text-slate-700">{section}</b></>}{reg && <> · Reg. No <b className="text-slate-700">{reg}</b></>}
           </p>
           <p className="mx-auto mt-4 max-w-lg text-sm leading-relaxed text-slate-600">
-            has successfully completed the <b>KL AI QuizApp{domain ? ` — ${domain}` : ''}</b> online examination on {today}, achieving the result below.
+            has successfully completed the <b>KL Skill Palaver{domain ? ` — ${domain}` : ''}</b> online examination on {today}, achieving the result below.
           </p>
 
           <div className="mx-auto mt-5 flex max-w-sm items-stretch justify-center gap-3">
@@ -85,7 +85,7 @@ export default function Result() {
 
           <div className="mt-7 flex items-end justify-between text-xs text-slate-400">
             <div className="text-left"><p className="border-t border-slate-300 pt-1 font-medium text-slate-500">Date: {today}</p></div>
-            <div className="text-right"><p className="border-t border-slate-300 pt-1 font-medium text-slate-500">KL AI QuizApp</p></div>
+            <div className="text-right"><p className="border-t border-slate-300 pt-1 font-medium text-slate-500">KL Skill Palaver</p></div>
           </div>
         </div>
       </div>
