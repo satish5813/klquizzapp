@@ -10,6 +10,7 @@ import { initStore } from './db.js';
 import { shuffle, normalizeQuestion } from './util.js';
 import { estimate, generateBank, extractMcqs } from './claude.js';
 import { registerProgramRoutes } from './programs.js';
+import { registerCertExamRoutes } from './certexam.js';
 
 const PORT = Number(process.env.PORT || 4000);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'change-me-admin';
@@ -1377,6 +1378,7 @@ app.get('/api/result/:attemptId', async (req, res) => {
 
 // Programs: titled events with room-wise attendance + hackathon review (see programs.js).
 registerProgramRoutes(app, { db, requireAdmin, getRubric });
+registerCertExamRoutes(app, { db, requireAdmin });
 
 // Serve the built student client (same origin as the API) if it's present.
 // Students open https://<this-server>/ and get the exam app; /api/* stays the API.

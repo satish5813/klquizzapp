@@ -155,6 +155,47 @@ export async function makeMysqlDb() {
       project_id VARCHAR(64), title VARCHAR(500), domain VARCHAR(190),
       INDEX ix_course (course_code)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    // ---- certification exams: courses, case studies, question bank, papers, attempts ----
+    await q(`CREATE TABLE IF NOT EXISTS cert_courses (
+      code VARCHAR(32) PRIMARY KEY, name VARCHAR(255), active TINYINT DEFAULT 1, created_at VARCHAR(32)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS cert_cases (
+      id VARCHAR(64) PRIMARY KEY, course_code VARCHAR(32) NOT NULL, title VARCHAR(255),
+      scenario MEDIUMTEXT, exhibits JSON, topic VARCHAR(190), difficulty VARCHAR(16), created_at VARCHAR(32),
+      INDEX ix_course (course_code)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS cert_questions (
+      id VARCHAR(64) PRIMARY KEY, course_code VARCHAR(32) NOT NULL, case_id VARCHAR(64) DEFAULT '',
+      type VARCHAR(12) NOT NULL DEFAULT 'single', question MEDIUMTEXT NOT NULL, options JSON NOT NULL,
+      answers JSON NOT NULL, marks INT DEFAULT 1, topic VARCHAR(190), difficulty VARCHAR(16),
+      explanation MEDIUMTEXT, norm VARCHAR(512), created_at VARCHAR(32),
+      UNIQUE KEY uq_cert_norm (norm), INDEX ix_cq_course (course_code), INDEX ix_cq_case (case_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS cert_papers (
+      id VARCHAR(64) PRIMARY KEY, course_code VARCHAR(32) NOT NULL, name VARCHAR(255),
+      duration_min INT DEFAULT 60, pass_mark INT DEFAULT 70, blueprint JSON, rules JSON,
+      created_at VARCHAR(32), updated_at VARCHAR(32), INDEX ix_cp_course (course_code)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS cert_exams (
+      id VARCHAR(64) PRIMARY KEY, paper_id VARCHAR(64) NOT NULL, course_code VARCHAR(32) NOT NULL,
+      title VARCHAR(255), start_at VARCHAR(32), end_at VARCHAR(32), status VARCHAR(16) DEFAULT 'scheduled',
+      audience JSON, created_at VARCHAR(32), INDEX ix_ce_course (course_code), INDEX ix_ce_start (start_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS cert_attempts (
+      id VARCHAR(64) PRIMARY KEY, exam_id VARCHAR(64) NOT NULL, reg VARCHAR(64) NOT NULL,
+      name VARCHAR(190), branch VARCHAR(64), section VARCHAR(64),
+      items JSON, answers JSON, marked JSON, score INT NULL, total INT NOT NULL DEFAULT 0,
+      status VARCHAR(16) NOT NULL DEFAULT 'in_progress', reason VARCHAR(64) DEFAULT '',
+      integrity INT DEFAULT 100, flags JSON, ip VARCHAR(64) DEFAULT '', session_id VARCHAR(64) DEFAULT '',
+      started_at VARCHAR(32), last_seen VARCHAR(32), submitted_at VARCHAR(32),
+      UNIQUE KEY uq_exam_reg (exam_id, reg), INDEX ix_ca_exam (exam_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await q(`CREATE TABLE IF NOT EXISTS cert_events (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY, attempt_id VARCHAR(64) NOT NULL, at VARCHAR(32),
+      kind VARCHAR(32), seconds INT DEFAULT 0, item INT DEFAULT -1, detail JSON,
+      INDEX ix_cev_attempt (attempt_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
     // migrate a pre-existing single-key (emp_id) table to the session-scoped composite key
     try { await q("ALTER TABLE attendance_postings ADD COLUMN session_id VARCHAR(64) NOT NULL DEFAULT ''"); }
     catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
@@ -168,6 +209,12 @@ export async function makeMysqlDb() {
   const toScore = (r) => ({ id: r.id, reviewId: r.review_id, batchId: r.batch_id, reg: r.reg, present: !!r.present, scores: r.scores || {}, total: r.total ?? 0, byEmp: r.by_emp || '', postedAt: r.posted_at });
   const toProgram = (r) => ({ id: r.id, title: r.title, createdAt: r.created_at });
   const toPStudent = (r) => ({ id: r.id, programId: r.program_id, reg: r.reg, courseCode: r.course_code || '', courseName: r.course_name || '', name: r.name || '', branch: r.branch || '', section: r.section || '', room: r.room || '', empId: r.emp_id || '', facultyName: r.faculty_name || '', facultyList: Array.isArray(r.faculty_list) ? r.faculty_list : [], batchNo: r.batch_no || '', reviewer: r.reviewer || '', project: r.project || '', ps: r.ps || '' });
+  const toCCourse = (r) => ({ code: r.code, name: r.name || '', active: !!r.active, createdAt: r.created_at });
+  const toCCase = (r) => ({ id: r.id, courseCode: r.course_code, title: r.title || '', scenario: r.scenario || '', exhibits: Array.isArray(r.exhibits) ? r.exhibits : [], topic: r.topic || '', difficulty: r.difficulty || '', createdAt: r.created_at });
+  const toCQuestion = (r) => ({ id: r.id, courseCode: r.course_code, caseId: r.case_id || '', type: r.type || 'single', question: r.question, options: r.options || [], answers: Array.isArray(r.answers) ? r.answers : [], marks: r.marks ?? 1, topic: r.topic || '', difficulty: r.difficulty || '', explanation: r.explanation || '', norm: r.norm, createdAt: r.created_at });
+  const toCPaper = (r) => ({ id: r.id, courseCode: r.course_code, name: r.name || '', durationMin: r.duration_min ?? 60, passMark: r.pass_mark ?? 70, blueprint: Array.isArray(r.blueprint) ? r.blueprint : [], rules: r.rules || {}, createdAt: r.created_at, updatedAt: r.updated_at });
+  const toCExam = (r) => ({ id: r.id, paperId: r.paper_id, courseCode: r.course_code, title: r.title || '', startAt: r.start_at || '', endAt: r.end_at || '', status: r.status || 'scheduled', audience: r.audience || {}, createdAt: r.created_at });
+  const toCAttempt = (r) => ({ id: r.id, examId: r.exam_id, reg: r.reg, name: r.name || '', branch: r.branch || '', section: r.section || '', items: Array.isArray(r.items) ? r.items : [], answers: r.answers || {}, marked: Array.isArray(r.marked) ? r.marked : [], score: r.score, total: r.total ?? 0, status: r.status, reason: r.reason || '', integrity: r.integrity ?? 100, flags: r.flags || {}, ip: r.ip || '', sessionId: r.session_id || '', startedAt: r.started_at, lastSeen: r.last_seen, submittedAt: r.submitted_at });
   const toCProject = (r) => ({ id: r.id, courseCode: r.course_code, courseName: r.course_name || '', projectId: r.project_id || '', title: r.title || '', domain: r.domain || '' });
   const toFac = (r) => ({ key: r.fkey, name: r.name || '', email: r.email || '', empId: r.emp_id || '', updatedAt: r.updated_at });
   const toAuth = (r) => ({ id: r.id, fkey: r.fkey, kind: r.kind, secretHash: r.secret_hash, expiresAt: r.expires_at, attempts: r.attempts ?? 0, createdAt: r.created_at });
@@ -414,6 +461,109 @@ export async function makeMysqlDb() {
         }
       },
     },
+    // ---- certification exams ----
+    certCourses: {
+      all: async () => (await q('SELECT * FROM cert_courses ORDER BY code')).map(toCCourse),
+      get: async (code) => { const r = await q('SELECT * FROM cert_courses WHERE code=?', [code]); return r[0] ? toCCourse(r[0]) : null; },
+      upsert: async (c) => {
+        await q(`INSERT INTO cert_courses (code, name, active, created_at) VALUES (?,?,?,?)
+                 ON DUPLICATE KEY UPDATE name=IF(VALUES(name)='', name, VALUES(name)), active=VALUES(active)`,
+          [c.code, c.name || '', c.active === false ? 0 : 1, c.createdAt || new Date().toISOString()]);
+        return c;
+      },
+      remove: async (code) => { await q('DELETE FROM cert_courses WHERE code=?', [code]); },
+    },
+    certCases: {
+      byCourse: async (code) => (await q('SELECT * FROM cert_cases WHERE course_code=? ORDER BY created_at', [code])).map(toCCase),
+      get: async (id) => { const r = await q('SELECT * FROM cert_cases WHERE id=?', [id]); return r[0] ? toCCase(r[0]) : null; },
+      upsert: async (c) => {
+        await q(`INSERT INTO cert_cases (id, course_code, title, scenario, exhibits, topic, difficulty, created_at) VALUES (?,?,?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE title=VALUES(title), scenario=VALUES(scenario), exhibits=VALUES(exhibits), topic=VALUES(topic), difficulty=VALUES(difficulty)`,
+          [c.id, c.courseCode, c.title || '', c.scenario || '', J(c.exhibits || []), c.topic || '', c.difficulty || '', c.createdAt || new Date().toISOString()]);
+        return c;
+      },
+      remove: async (id) => { await q('DELETE FROM cert_questions WHERE case_id=?', [id]); await q('DELETE FROM cert_cases WHERE id=?', [id]); },
+    },
+    certQuestions: {
+      byCourse: async (code) => (await q('SELECT * FROM cert_questions WHERE course_code=? ORDER BY case_id, created_at', [code])).map(toCQuestion),
+      byCase: async (caseId) => (await q('SELECT * FROM cert_questions WHERE case_id=? ORDER BY created_at', [caseId])).map(toCQuestion),
+      byIds: async (ids) => (ids.length ? (await q('SELECT * FROM cert_questions WHERE id IN (?)', [ids])).map(toCQuestion) : []),
+      countByCourse: async (code) => (await q('SELECT COUNT(*) n FROM cert_questions WHERE course_code=?', [code]))[0].n,
+      addMany: async (items) => {
+        if (!items.length) return 0;
+        const rows = items.map((i) => [i.id, i.courseCode, i.caseId || '', i.type || 'single', i.question, J(i.options), J(i.answers), i.marks || 1, i.topic || '', i.difficulty || '', i.explanation || '', i.norm, i.createdAt || new Date().toISOString()]);
+        const before = (await q('SELECT COUNT(*) n FROM cert_questions'))[0].n;
+        await q('INSERT IGNORE INTO cert_questions (id, course_code, case_id, type, question, options, answers, marks, topic, difficulty, explanation, norm, created_at) VALUES ?', [rows]);
+        return (await q('SELECT COUNT(*) n FROM cert_questions'))[0].n - before;
+      },
+      update: async (id, p) => {
+        const sets = []; const vals = [];
+        for (const [k, col] of [['question', 'question'], ['type', 'type'], ['marks', 'marks'], ['topic', 'topic'], ['difficulty', 'difficulty'], ['explanation', 'explanation'], ['caseId', 'case_id']]) if (p[k] !== undefined) { sets.push(`${col}=?`); vals.push(p[k]); }
+        for (const k of ['options', 'answers']) if (p[k] !== undefined) { sets.push(`${k}=?`); vals.push(J(p[k])); }
+        if (!sets.length) return null;
+        await q(`UPDATE cert_questions SET ${sets.join(', ')} WHERE id=?`, [...vals, id]);
+        const r = await q('SELECT * FROM cert_questions WHERE id=?', [id]);
+        return r[0] ? toCQuestion(r[0]) : null;
+      },
+      remove: async (id) => { await q('DELETE FROM cert_questions WHERE id=?', [id]); },
+    },
+    certPapers: {
+      all: async () => (await q('SELECT * FROM cert_papers ORDER BY course_code, created_at')).map(toCPaper),
+      byCourse: async (code) => (await q('SELECT * FROM cert_papers WHERE course_code=? ORDER BY created_at', [code])).map(toCPaper),
+      get: async (id) => { const r = await q('SELECT * FROM cert_papers WHERE id=?', [id]); return r[0] ? toCPaper(r[0]) : null; },
+      upsert: async (p) => {
+        await q(`INSERT INTO cert_papers (id, course_code, name, duration_min, pass_mark, blueprint, rules, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE name=VALUES(name), duration_min=VALUES(duration_min), pass_mark=VALUES(pass_mark),
+                 blueprint=VALUES(blueprint), rules=VALUES(rules), updated_at=VALUES(updated_at)`,
+          [p.id, p.courseCode, p.name || '', p.durationMin || 60, p.passMark ?? 70, J(p.blueprint || []), J(p.rules || {}), p.createdAt || new Date().toISOString(), new Date().toISOString()]);
+        return p;
+      },
+      remove: async (id) => { await q('DELETE FROM cert_papers WHERE id=?', [id]); },
+    },
+    certExams: {
+      all: async () => (await q('SELECT * FROM cert_exams ORDER BY start_at DESC')).map(toCExam),
+      get: async (id) => { const r = await q('SELECT * FROM cert_exams WHERE id=?', [id]); return r[0] ? toCExam(r[0]) : null; },
+      upsert: async (e) => {
+        await q(`INSERT INTO cert_exams (id, paper_id, course_code, title, start_at, end_at, status, audience, created_at) VALUES (?,?,?,?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE paper_id=VALUES(paper_id), title=VALUES(title), start_at=VALUES(start_at),
+                 end_at=VALUES(end_at), status=VALUES(status), audience=VALUES(audience)`,
+          [e.id, e.paperId, e.courseCode, e.title || '', e.startAt || '', e.endAt || '', e.status || 'scheduled', J(e.audience || {}), e.createdAt || new Date().toISOString()]);
+        return e;
+      },
+      remove: async (id) => { await q('DELETE FROM cert_exams WHERE id=?', [id]); },
+    },
+    certAttempts: {
+      byExam: async (examId) => (await q('SELECT * FROM cert_attempts WHERE exam_id=? ORDER BY started_at', [examId])).map(toCAttempt),
+      get: async (id) => { const r = await q('SELECT * FROM cert_attempts WHERE id=?', [id]); return r[0] ? toCAttempt(r[0]) : null; },
+      byExamReg: async (examId, reg) => { const r = await q('SELECT * FROM cert_attempts WHERE exam_id=? AND reg=?', [examId, reg]); return r[0] ? toCAttempt(r[0]) : null; },
+      add: async (a) => {
+        await q(`INSERT INTO cert_attempts (id, exam_id, reg, name, branch, section, items, answers, marked, score, total, status, reason, integrity, flags, ip, session_id, started_at, last_seen, submitted_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [a.id, a.examId, a.reg, a.name || '', a.branch || '', a.section || '', J(a.items || []), J(a.answers || {}), J(a.marked || []), a.score ?? null, a.total || 0, a.status || 'in_progress', a.reason || '', a.integrity ?? 100, J(a.flags || {}), a.ip || '', a.sessionId || '', a.startedAt, a.lastSeen || a.startedAt, a.submittedAt || null]);
+        return a;
+      },
+      update: async (id, p) => {
+        const sets = []; const vals = [];
+        const map = { score: 'score', total: 'total', status: 'status', reason: 'reason', integrity: 'integrity', ip: 'ip', sessionId: 'session_id', lastSeen: 'last_seen', submittedAt: 'submitted_at', name: 'name' };
+        for (const [k, col] of Object.entries(map)) if (p[k] !== undefined) { sets.push(`${col}=?`); vals.push(p[k]); }
+        for (const k of ['items', 'answers', 'marked', 'flags']) if (p[k] !== undefined) { sets.push(`${k === 'items' ? 'items' : k}=?`); vals.push(J(p[k])); }
+        if (!sets.length) return null;
+        await q(`UPDATE cert_attempts SET ${sets.join(', ')} WHERE id=?`, [...vals, id]);
+        const r = await q('SELECT * FROM cert_attempts WHERE id=?', [id]);
+        return r[0] ? toCAttempt(r[0]) : null;
+      },
+    },
+    certEvents: {
+      add: async (attemptId, rows) => {
+        if (!rows.length) return 0;
+        await q('INSERT INTO cert_events (attempt_id, at, kind, seconds, item, detail) VALUES ?',
+          [rows.map((e) => [attemptId, e.at, e.kind, e.seconds || 0, e.item ?? -1, J(e.detail || {})])]);
+        return rows.length;
+      },
+      byAttempt: async (attemptId) => (await q('SELECT * FROM cert_events WHERE attempt_id=? ORDER BY id', [attemptId]))
+        .map((r) => ({ at: r.at, kind: r.kind, seconds: r.seconds, item: r.item, detail: r.detail || {} })),
+    },
+
     // course-wise project register
     courseProjects: {
       all: async () => (await q('SELECT * FROM course_projects ORDER BY course_code, project_id')).map(toCProject),

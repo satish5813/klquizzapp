@@ -235,6 +235,57 @@ export const jsonDb = {
       write('programStudents', cur);
     },
   },
+  // ---- certification exams ----
+  certCourses: {
+    all: async () => read('certCourses').sort((a, b) => String(a.code).localeCompare(String(b.code))),
+    get: async (code) => read('certCourses').find((c) => c.code === code) || null,
+    upsert: async (c) => { const cur = read('certCourses').filter((x) => x.code !== c.code); cur.push({ ...c, active: c.active !== false }); write('certCourses', cur); return c; },
+    remove: async (code) => write('certCourses', read('certCourses').filter((c) => c.code !== code)),
+  },
+  certCases: {
+    byCourse: async (code) => read('certCases').filter((c) => c.courseCode === code),
+    get: async (id) => read('certCases').find((c) => c.id === id) || null,
+    upsert: async (c) => { const cur = read('certCases').filter((x) => x.id !== c.id); cur.push(c); write('certCases', cur); return c; },
+    remove: async (id) => { write('certQuestions', read('certQuestions').filter((x) => x.caseId !== id)); write('certCases', read('certCases').filter((c) => c.id !== id)); },
+  },
+  certQuestions: {
+    byCourse: async (code) => read('certQuestions').filter((x) => x.courseCode === code),
+    byCase: async (caseId) => read('certQuestions').filter((x) => x.caseId === caseId),
+    byIds: async (ids) => read('certQuestions').filter((x) => ids.includes(x.id)),
+    countByCourse: async (code) => read('certQuestions').filter((x) => x.courseCode === code).length,
+    addMany: async (items) => {
+      const cur = read('certQuestions'); const seen = new Set(cur.map((x) => x.norm)); let added = 0;
+      for (const i of items) { if (i.norm && seen.has(i.norm)) continue; seen.add(i.norm); cur.push(i); added++; }
+      write('certQuestions', cur); return added;
+    },
+    update: async (id, p) => { const cur = read('certQuestions'); const i = cur.findIndex((x) => x.id === id); if (i === -1) return null; cur[i] = { ...cur[i], ...p }; write('certQuestions', cur); return cur[i]; },
+    remove: async (id) => write('certQuestions', read('certQuestions').filter((x) => x.id !== id)),
+  },
+  certPapers: {
+    all: async () => read('certPapers'),
+    byCourse: async (code) => read('certPapers').filter((p) => p.courseCode === code),
+    get: async (id) => read('certPapers').find((p) => p.id === id) || null,
+    upsert: async (p) => { const cur = read('certPapers').filter((x) => x.id !== p.id); cur.push({ ...p, updatedAt: new Date().toISOString() }); write('certPapers', cur); return p; },
+    remove: async (id) => write('certPapers', read('certPapers').filter((p) => p.id !== id)),
+  },
+  certExams: {
+    all: async () => read('certExams').sort((a, b) => String(b.startAt).localeCompare(String(a.startAt))),
+    get: async (id) => read('certExams').find((e) => e.id === id) || null,
+    upsert: async (e) => { const cur = read('certExams').filter((x) => x.id !== e.id); cur.push(e); write('certExams', cur); return e; },
+    remove: async (id) => write('certExams', read('certExams').filter((e) => e.id !== id)),
+  },
+  certAttempts: {
+    byExam: async (examId) => read('certAttempts').filter((a) => a.examId === examId),
+    get: async (id) => read('certAttempts').find((a) => a.id === id) || null,
+    byExamReg: async (examId, reg) => read('certAttempts').find((a) => a.examId === examId && String(a.reg) === String(reg)) || null,
+    add: async (a) => { const cur = read('certAttempts'); cur.push(a); write('certAttempts', cur); return a; },
+    update: async (id, p) => { const cur = read('certAttempts'); const i = cur.findIndex((a) => a.id === id); if (i === -1) return null; cur[i] = { ...cur[i], ...p }; write('certAttempts', cur); return cur[i]; },
+  },
+  certEvents: {
+    add: async (attemptId, rows) => { const cur = read('certEvents'); rows.forEach((e) => cur.push({ attemptId, ...e })); write('certEvents', cur); return rows.length; },
+    byAttempt: async (attemptId) => read('certEvents').filter((e) => e.attemptId === attemptId),
+  },
+
   // course-wise project register
   courseProjects: {
     all: async () => read('courseProjects'),
