@@ -157,7 +157,8 @@ export async function makeMysqlDb() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
     // ---- certification exams: courses, case studies, question bank, papers, attempts ----
     await q(`CREATE TABLE IF NOT EXISTS cert_courses (
-      code VARCHAR(32) PRIMARY KEY, name VARCHAR(255), active TINYINT DEFAULT 1, created_at VARCHAR(32)
+      code VARCHAR(32) PRIMARY KEY, name VARCHAR(255), cert_name VARCHAR(255), department VARCHAR(190),
+      coordinator VARCHAR(190), syllabus MEDIUMTEXT, outcomes JSON, active TINYINT DEFAULT 1, created_at VARCHAR(32)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
     await q(`CREATE TABLE IF NOT EXISTS cert_cases (
       id VARCHAR(64) PRIMARY KEY, course_code VARCHAR(32) NOT NULL, title VARCHAR(255),
@@ -209,7 +210,7 @@ export async function makeMysqlDb() {
   const toScore = (r) => ({ id: r.id, reviewId: r.review_id, batchId: r.batch_id, reg: r.reg, present: !!r.present, scores: r.scores || {}, total: r.total ?? 0, byEmp: r.by_emp || '', postedAt: r.posted_at });
   const toProgram = (r) => ({ id: r.id, title: r.title, createdAt: r.created_at });
   const toPStudent = (r) => ({ id: r.id, programId: r.program_id, reg: r.reg, courseCode: r.course_code || '', courseName: r.course_name || '', name: r.name || '', branch: r.branch || '', section: r.section || '', room: r.room || '', empId: r.emp_id || '', facultyName: r.faculty_name || '', facultyList: Array.isArray(r.faculty_list) ? r.faculty_list : [], batchNo: r.batch_no || '', reviewer: r.reviewer || '', project: r.project || '', ps: r.ps || '' });
-  const toCCourse = (r) => ({ code: r.code, name: r.name || '', active: !!r.active, createdAt: r.created_at });
+  const toCCourse = (r) => ({ code: r.code, name: r.name || '', certName: r.cert_name || '', department: r.department || '', coordinator: r.coordinator || '', syllabus: r.syllabus || '', outcomes: Array.isArray(r.outcomes) ? r.outcomes : [], active: !!r.active, createdAt: r.created_at });
   const toCCase = (r) => ({ id: r.id, courseCode: r.course_code, title: r.title || '', scenario: r.scenario || '', exhibits: Array.isArray(r.exhibits) ? r.exhibits : [], topic: r.topic || '', difficulty: r.difficulty || '', createdAt: r.created_at });
   const toCQuestion = (r) => ({ id: r.id, courseCode: r.course_code, caseId: r.case_id || '', type: r.type || 'single', question: r.question, options: r.options || [], answers: Array.isArray(r.answers) ? r.answers : [], marks: r.marks ?? 1, topic: r.topic || '', difficulty: r.difficulty || '', explanation: r.explanation || '', norm: r.norm, createdAt: r.created_at });
   const toCPaper = (r) => ({ id: r.id, courseCode: r.course_code, name: r.name || '', durationMin: r.duration_min ?? 60, passMark: r.pass_mark ?? 70, blueprint: Array.isArray(r.blueprint) ? r.blueprint : [], rules: r.rules || {}, createdAt: r.created_at, updatedAt: r.updated_at });
@@ -466,9 +467,11 @@ export async function makeMysqlDb() {
       all: async () => (await q('SELECT * FROM cert_courses ORDER BY code')).map(toCCourse),
       get: async (code) => { const r = await q('SELECT * FROM cert_courses WHERE code=?', [code]); return r[0] ? toCCourse(r[0]) : null; },
       upsert: async (c) => {
-        await q(`INSERT INTO cert_courses (code, name, active, created_at) VALUES (?,?,?,?)
-                 ON DUPLICATE KEY UPDATE name=IF(VALUES(name)='', name, VALUES(name)), active=VALUES(active)`,
-          [c.code, c.name || '', c.active === false ? 0 : 1, c.createdAt || new Date().toISOString()]);
+        await q(`INSERT INTO cert_courses (code, name, cert_name, department, coordinator, syllabus, outcomes, active, created_at) VALUES (?,?,?,?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE name=IF(VALUES(name)='', name, VALUES(name)), cert_name=IF(VALUES(cert_name)='', cert_name, VALUES(cert_name)),
+                 department=IF(VALUES(department)='', department, VALUES(department)), coordinator=IF(VALUES(coordinator)='', coordinator, VALUES(coordinator)),
+                 syllabus=IF(VALUES(syllabus)='', syllabus, VALUES(syllabus)), outcomes=VALUES(outcomes), active=VALUES(active)`,
+          [c.code, c.name || '', c.certName || '', c.department || '', c.coordinator || '', c.syllabus || '', J(c.outcomes || []), c.active === false ? 0 : 1, c.createdAt || new Date().toISOString()]);
         return c;
       },
       remove: async (code) => { await q('DELETE FROM cert_courses WHERE code=?', [code]); },

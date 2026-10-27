@@ -37,7 +37,13 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
   app.post('/api/admin/cert/courses', requireAdmin, async (req, res) => {
     const code = txt(req.body?.code, 32).toUpperCase();
     if (!code) return res.status(400).json({ error: 'Course code is needed.' });
-    const c = { code, name: txt(req.body?.name, 255), active: req.body?.active !== false, createdAt: now() };
+    const c = {
+      code, name: txt(req.body?.name, 255), certName: txt(req.body?.certName, 255),
+      department: txt(req.body?.department), coordinator: txt(req.body?.coordinator),
+      syllabus: String(req.body?.syllabus ?? '').slice(0, 40000),
+      outcomes: ok(req.body?.outcomes).map((o) => ({ no: num(o.no, 0, 0, 99), btl: num(o.btl, 0, 0, 6), text: txt(o.text, 500) })),
+      active: req.body?.active !== false, createdAt: now(),
+    };
     await db.certCourses.upsert(c);
     res.json(c);
   });

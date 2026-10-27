@@ -239,7 +239,12 @@ export const jsonDb = {
   certCourses: {
     all: async () => read('certCourses').sort((a, b) => String(a.code).localeCompare(String(b.code))),
     get: async (code) => read('certCourses').find((c) => c.code === code) || null,
-    upsert: async (c) => { const cur = read('certCourses').filter((x) => x.code !== c.code); cur.push({ ...c, active: c.active !== false }); write('certCourses', cur); return c; },
+    upsert: async (c) => {
+      const cur = read('certCourses'); const old = cur.find((x) => x.code === c.code) || {};
+      const next = cur.filter((x) => x.code !== c.code);
+      next.push({ ...old, ...c, name: c.name || old.name || '', certName: c.certName || old.certName || '', syllabus: c.syllabus || old.syllabus || '', outcomes: (c.outcomes && c.outcomes.length) ? c.outcomes : (old.outcomes || []), active: c.active !== false });
+      write('certCourses', next); return c;
+    },
     remove: async (code) => write('certCourses', read('certCourses').filter((c) => c.code !== code)),
   },
   certCases: {
