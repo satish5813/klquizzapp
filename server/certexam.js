@@ -188,6 +188,38 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
     return JSON.parse(block.text);
   }
 
+  const GEMINI_MODEL = process.env.CERT_GEMINI_MODEL || 'gemini-3.8-flash';
+
+  async function askGemini({ apiKey, prompt, schema, model }) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model || GEMINI_MODEL)}:generateContent`;
+    const call = async (strict) => {
+      const generationConfig = { responseMimeType: 'application/json', maxOutputTokens: 16000 };
+      if (strict) Object.assign(generationConfig, { responseJsonSchema: schema, thinkingConfig: { thinkingLevel: 'low' } });
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: strict ? prompt : `${prompt}\n\nReply with JSON only, matching this JSON schema exactly:\n${JSON.stringify(schema)}` }] }],
+          generationConfig,
+        }),
+      });
+      const text = await res.text();
+      let body = {}; try { body = JSON.parse(text); } catch { /* not JSON */ }
+      if (!res.ok) { const e = new Error(body.error?.message || `Gemini API ${res.status}`); e.status = res.status; throw e; }
+      const parts = body.candidates?.[0]?.content?.parts || [];
+      const out = parts.filter((p) => !p.thought && typeof p.text === 'string').map((p) => p.text).join('').trim();
+      if (!out) throw new Error(`Gemini returned no content${body.candidates?.[0]?.finishReason ? ` (${body.candidates[0].finishReason})` : ''}.`);
+      return JSON.parse(out.replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    };
+    try { return await call(true); } catch (e) {
+      // older/newer models may reject the schema or thinking fields — retry with the schema in the prompt
+      if (e.status === 400 && !/api key/i.test(e.message)) return call(false);
+      throw e;
+    }
+  }
+
+  const ask = (provider, args) => (provider === 'gemini' ? askGemini(args) : askClaude(args));
+
   const courseBrief = (c, projects) => [
     `Certification course: ${c.name} (${c.code}).`,
     c.certName ? `It prepares students for: ${c.certName}.` : '',
@@ -199,7 +231,8 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
   const STYLE = [
     'Write in the style of the real global certification exam: practical, scenario-led, no trick questions.',
     'Every option must be plausible to someone who half-knows the topic; wrong options are common misconceptions, never silly.',
-    'Exactly four options. Use "answers" with one index for a single-answer question, or two indexes when the stem says "choose two".',
+    'Exactly four options. Use "answers" with one index for a single-answer question, or two indexes when the stem says "choose two". Indexes are zero-based: 0 is the first option, 3 the last.',
+    'Options are plain text with no "A)" or "1." prefix.',
     'EASY = recall or a single fact. MEDIUM = apply a concept to a short situation. HARD = compare trade-offs, or pick the best of two defensible designs.',
     'No "all of the above", no "none of the above", no negative stems unless the word NOT is capitalised.',
     'topic must be a short phrase taken from the syllabus. explanation is one sentence saying why the answer is right.',
@@ -208,8 +241,9 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
 
   /** Generate one batch of standalone questions, or one case study with its questions. */
   app.post('/api/admin/cert/generate', requireAdmin, async (req, res) => {
-    const apiKey = String(req.body?.apiKey || process.env.ANTHROPIC_API_KEY || '').trim();
-    if (!apiKey) return res.status(400).json({ error: 'A Claude API key is needed. Paste it in the admin (it stays in your browser) or set ANTHROPIC_API_KEY on the server.' });
+    const provider = req.body?.provider === 'gemini' ? 'gemini' : 'claude';
+    const apiKey = String(req.body?.apiKey || (provider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.ANTHROPIC_API_KEY) || '').trim();
+    if (!apiKey) return res.status(400).json({ error: `A ${provider === 'gemini' ? 'Gemini' : 'Claude'} API key is needed. Paste it in the admin (it stays in your browser) or set ${provider === 'gemini' ? 'GEMINI_API_KEY' : 'ANTHROPIC_API_KEY'} on the server.` });
     const course = await db.certCourses.get(txt(req.body?.courseCode, 32).toUpperCase());
     if (!course) return res.status(404).json({ error: 'Course not found' });
     if (!course.syllabus) return res.status(400).json({ error: 'This course has no syllabus stored, so questions cannot be grounded in it.' });
@@ -224,7 +258,7 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
 
     try {
       if (kind === 'case') {
-        const data = await askClaude({
+        const data = await ask(provider, {
           apiKey, model: txt(req.body?.model, 64), schema: CASE_SCHEMA,
           prompt: [
             courseBrief(course, projects), '',
@@ -241,7 +275,7 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
           questions: ok(data.questions).slice(0, count),
         });
       }
-      const data = await askClaude({
+      const data = await ask(provider, {
         apiKey, model: txt(req.body?.model, 64), schema: QUESTION_SCHEMA,
         prompt: [
           courseBrief(course, projects), '',
