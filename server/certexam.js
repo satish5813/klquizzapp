@@ -141,6 +141,165 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
     res.json({ ok: true });
   });
 
+  // ---------------- AI question generation ----------------
+  // One batch per request, so the browser can show progress and nothing times out.
+  const GEN_MODEL = process.env.CERT_MODEL || 'claude-sonnet-4-5';
+
+  const QUESTION_SCHEMA = {
+    type: 'object', additionalProperties: false, required: ['questions'],
+    properties: {
+      questions: {
+        type: 'array', items: {
+          type: 'object', additionalProperties: false,
+          required: ['question', 'options', 'answers', 'topic', 'difficulty', 'explanation'],
+          properties: {
+            question: { type: 'string' },
+            options: { type: 'array', minItems: 4, maxItems: 4, items: { type: 'string' } },
+            answers: { type: 'array', minItems: 1, maxItems: 2, items: { type: 'integer' } },
+            topic: { type: 'string' }, difficulty: { type: 'string', enum: ['EASY', 'MEDIUM', 'HARD'] },
+            explanation: { type: 'string' },
+          },
+        },
+      },
+    },
+  };
+  const CASE_SCHEMA = {
+    type: 'object', additionalProperties: false, required: ['title', 'scenario', 'questions'],
+    properties: {
+      title: { type: 'string' }, scenario: { type: 'string' },
+      questions: QUESTION_SCHEMA.properties.questions,
+    },
+  };
+
+  async function askClaude({ apiKey, prompt, schema, model }) {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: model || GEN_MODEL, max_tokens: 8000,
+        output_config: { format: { type: 'json_schema', schema } },
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    const text = await res.text();
+    if (!res.ok) { let m = `Claude API ${res.status}`; try { m = JSON.parse(text).error?.message || m; } catch { /* keep */ } throw new Error(m); }
+    const block = (JSON.parse(text).content || []).find((b) => b.type === 'text');
+    if (!block) throw new Error('Claude returned no content.');
+    return JSON.parse(block.text);
+  }
+
+  const courseBrief = (c, projects) => [
+    `Certification course: ${c.name} (${c.code}).`,
+    c.certName ? `It prepares students for: ${c.certName}.` : '',
+    `Syllabus: ${c.syllabus}`,
+    c.outcomes?.length ? `Course outcomes: ${c.outcomes.map((o) => `CO${o.no} (Bloom level ${o.btl}) ${o.text}`).join('; ')}` : '',
+    projects?.length ? `Typical student project themes: ${projects.slice(0, 25).join('; ')}.` : '',
+  ].filter(Boolean).join('\n');
+
+  const STYLE = [
+    'Write in the style of the real global certification exam: practical, scenario-led, no trick questions.',
+    'Every option must be plausible to someone who half-knows the topic; wrong options are common misconceptions, never silly.',
+    'Exactly four options. Use "answers" with one index for a single-answer question, or two indexes when the stem says "choose two".',
+    'EASY = recall or a single fact. MEDIUM = apply a concept to a short situation. HARD = compare trade-offs, or pick the best of two defensible designs.',
+    'No "all of the above", no "none of the above", no negative stems unless the word NOT is capitalised.',
+    'topic must be a short phrase taken from the syllabus. explanation is one sentence saying why the answer is right.',
+    'British spelling, plain language, no markdown.',
+  ].join(' ');
+
+  /** Generate one batch of standalone questions, or one case study with its questions. */
+  app.post('/api/admin/cert/generate', requireAdmin, async (req, res) => {
+    const apiKey = String(req.body?.apiKey || process.env.ANTHROPIC_API_KEY || '').trim();
+    if (!apiKey) return res.status(400).json({ error: 'A Claude API key is needed. Paste it in the admin (it stays in your browser) or set ANTHROPIC_API_KEY on the server.' });
+    const course = await db.certCourses.get(txt(req.body?.courseCode, 32).toUpperCase());
+    if (!course) return res.status(404).json({ error: 'Course not found' });
+    if (!course.syllabus) return res.status(400).json({ error: 'This course has no syllabus stored, so questions cannot be grounded in it.' });
+
+    const projects = (await db.courseProjects.byCourses([course.code])).map((p) => p.title);
+    const existing = (await db.certQuestions.byCourse(course.code)).map((q) => q.question);
+    const avoid = existing.slice(-60).map((q) => `- ${q.slice(0, 120)}`).join('\n');
+    const kind = req.body?.kind === 'case' ? 'case' : 'questions';
+    const count = num(req.body?.count, 10, 1, 12);
+    const difficulty = ['EASY', 'MEDIUM', 'HARD'].includes(txt(req.body?.difficulty, 16).toUpperCase()) ? txt(req.body.difficulty, 16).toUpperCase() : 'MEDIUM';
+    const multi = num(req.body?.multi, 0, 0, 6); // how many of them should be "choose two"
+
+    try {
+      if (kind === 'case') {
+        const data = await askClaude({
+          apiKey, model: txt(req.body?.model, 64), schema: CASE_SCHEMA,
+          prompt: [
+            courseBrief(course, projects), '',
+            `Write ONE case study for this certification exam, then ${count} questions that can only be answered after reading it.`,
+            'The scenario is 120-200 words: a real organisation with a concrete need, constraints (budget, compliance, traffic, deadline) and the current setup. No question text inside the scenario.',
+            `Difficulty of the questions: ${difficulty}.${multi ? ` Exactly ${multi} of them must say "choose two" and have two correct answers.` : ''}`,
+            STYLE,
+            avoid ? `Do not repeat anything close to these existing questions:\n${avoid}` : '',
+          ].filter(Boolean).join('\n'),
+        });
+        return res.json({
+          kind: 'case',
+          case: { title: txt(data.title, 255) || 'Case study', scenario: String(data.scenario || '').slice(0, 20000), topic: txt(data.questions?.[0]?.topic), difficulty },
+          questions: ok(data.questions).slice(0, count),
+        });
+      }
+      const data = await askClaude({
+        apiKey, model: txt(req.body?.model, 64), schema: QUESTION_SCHEMA,
+        prompt: [
+          courseBrief(course, projects), '',
+          `Write ${count} standalone multiple-choice questions at ${difficulty} difficulty for this certification exam.`,
+          multi ? `Exactly ${multi} of them must say "choose two" and have two correct answers.` : 'Each has exactly one correct answer.',
+          'Spread them across different parts of the syllabus — do not cluster on one topic.',
+          STYLE,
+          avoid ? `Do not repeat anything close to these existing questions:\n${avoid}` : '',
+        ].filter(Boolean).join('\n'),
+      });
+      res.json({ kind: 'questions', questions: ok(data.questions).slice(0, count) });
+    } catch (e) {
+      res.status(502).json({ error: e.message });
+    }
+  });
+
+  /** Save a reviewed batch: optional case study plus its questions. */
+  app.post('/api/admin/cert/generate/publish', requireAdmin, async (req, res) => {
+    const courseCode = txt(req.body?.courseCode, 32).toUpperCase();
+    if (!await db.certCourses.get(courseCode)) return res.status(404).json({ error: 'Course not found' });
+    let caseId = txt(req.body?.caseId, 64);
+    if (req.body?.case?.scenario) {
+      const c = {
+        id: crypto.randomUUID(), courseCode, title: txt(req.body.case.title, 255) || 'Case study',
+        scenario: String(req.body.case.scenario).slice(0, 20000), exhibits: [],
+        topic: txt(req.body.case.topic), difficulty: txt(req.body.case.difficulty, 16).toUpperCase(), createdAt: now(),
+      };
+      await db.certCases.upsert(c);
+      caseId = c.id;
+    }
+    const rows = [];
+    for (const x of ok(req.body?.questions)) {
+      const question = String(x.question ?? '').trim();
+      const options = ok(x.options).map((o) => String(o ?? '').trim()).filter(Boolean);
+      const answers = [...new Set(ok(x.answers).map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n < options.length))].sort((a, b) => a - b);
+      if (!question || options.length < 2 || !answers.length) continue;
+      rows.push({
+        id: crypto.randomUUID(), courseCode, caseId, type: answers.length > 1 ? 'multi' : 'single',
+        question: question.slice(0, 8000), options, answers, marks: num(x.marks, answers.length > 1 ? 2 : 1, 1, 20),
+        topic: txt(x.topic), difficulty: txt(x.difficulty, 16).toUpperCase() || 'MEDIUM',
+        explanation: String(x.explanation ?? '').slice(0, 8000), norm: normOf(`${courseCode}|${question}`), createdAt: now(),
+      });
+    }
+    const added = rows.length ? await db.certQuestions.addMany(rows) : 0;
+    res.json({ added, duplicates: rows.length - added, caseId, total: await db.certQuestions.countByCourse(courseCode) });
+  });
+
+  /** Sections and branches that actually exist in the student roster, for scheduling. */
+  app.get('/api/admin/cert/audience', requireAdmin, async (_req, res) => {
+    const students = await db.students.all();
+    const count = (key) => {
+      const m = new Map();
+      for (const s of students) { const v = String(s[key] || '').trim(); if (v) m.set(v, (m.get(v) || 0) + 1); }
+      return [...m.entries()].map(([name, n]) => ({ name, students: n })).sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true }));
+    };
+    res.json({ sections: count('section'), branches: count('branch'), total: students.length });
+  });
+
   // ---------------- paper setting (the blueprint) ----------------
   app.get('/api/admin/cert/papers', requireAdmin, async (req, res) => {
     const code = txt(req.query.course, 32).toUpperCase();
