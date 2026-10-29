@@ -14,6 +14,15 @@ interface RoomRes { previous?: PrevRound[]; courses?: { code: string; name: stri
 
 interface RowState { present: boolean; scores: Record<string, number>; project: string; projectId: string; batchNo: string; }
 const when = (c: { date: string; startTime: string; endTime: string }) => [c.date ? new Date(c.date + 'T00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '', c.startTime && c.endTime ? `${c.startTime}–${c.endTime}` : c.startTime].filter(Boolean).join(' · ');
+/** What a closed card says: when it opens (Indian time), or that its time is over. */
+function closedNote(c: { date: string; startTime: string; endTime: string }) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(c.date || '') || !/^\d{1,2}:\d{2}$/.test(c.startTime || '') || !/^\d{1,2}:\d{2}$/.test(c.endTime || '')) return 'Not open yet';
+  const at = (t: string) => Date.parse(`${c.date}T${t.padStart(5, '0')}:00+05:30`);
+  const start = at(c.startTime); let end = at(c.endTime);
+  if (end <= start) end += 86_400_000;
+  const fmt = (ms: number) => new Date(ms).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+  return Date.now() < start ? `Opens ${fmt(start)}` : Date.now() >= end ? 'Closed' : 'Not open yet';
+}
 
 export default function FacultyRooms({ kind }: { kind: Kind }) {
   const isReview = kind === 'review';
@@ -204,7 +213,7 @@ export default function FacultyRooms({ kind }: { kind: Kind }) {
                     {isReview ? `${c.batches ? `Your ${c.batches} batch${c.batches === 1 ? '' : 'es'} · ` : ''}${c.scored ? `${c.scored}/${c.students} scored` : `${c.students} students`}`
                       : c.posted ? `${c.present} present · ${c.absent} absent` : `${c.students} students`}
                   </p>
-                  <p className={`mt-1 text-sm font-semibold ${canMark ? 'text-amber-700' : 'text-slate-400'}`}>{canMark ? (isReview ? 'Tap to enter marks →' : 'Tap to take attendance →') : c.posted ? 'Tap to view' : 'Not open yet'}</p>
+                  <p className={`mt-1 text-sm font-semibold ${canMark ? 'text-amber-700' : 'text-slate-400'}`}>{canMark ? (isReview ? 'Tap to enter marks →' : 'Tap to take attendance →') : c.posted ? 'Tap to view' : closedNote(c)}</p>
                 </button>
               );
             })}

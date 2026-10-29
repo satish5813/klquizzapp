@@ -55,6 +55,89 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
   const otpOn = async () => (await loginMode()) === 'otp' && (smtpConfigured() || OTP_DEBUG());
   const authInfo = async () => ({ mode: await loginMode(), otp: await otpOn(), smtp: smtpConfigured(), smtpUser: smtpUser() });
 
+  // ---------- automatic open / close ----------
+  // A session with `auto` on opens ALL its rooms at its start time and closes them at its end
+  // time (Indian time), and emails the program's faculty REMIND_MS before it opens. Each step
+  // happens once (autoState '' → reminded → opened → closed), so the admin can still open or
+  // close single rooms by hand in between. Every cluster worker runs the tick; the database
+  // claim lets exactly one of them perform each step.
+  const REMIND_MS = 5 * 60_000;
+  const HHMM = /^(\d{1,2}):(\d{2})$/;
+  function windowOf(s) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s.date || '') || !HHMM.test(s.startTime || '') || !HHMM.test(s.endTime || '')) return null;
+    const at = (t) => Date.parse(`${s.date}T${t.padStart(5, '0')}:00+05:30`);
+    const start = at(s.startTime); let end = at(s.endTime);
+    if (end <= start) end += 86_400_000; // runs past midnight
+    return Number.isFinite(start) ? { start, end } : null;
+  }
+  const clock = (t) => { const [, h, m] = HHMM.exec(t); const n = Number(h); return `${n % 12 || 12}:${m} ${n < 12 ? 'AM' : 'PM'}`; };
+  const longDate = (d) => new Date(`${d}T00:00:00+05:30`).toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Asia/Kolkata' });
+
+  /** The faculty site lives on the API's own host; remember it from an admin request for emails. */
+  function rememberPublicUrl(req) {
+    const host = req.get('x-forwarded-host') || req.get('host');
+    if (!host || /^(localhost|127\.)/.test(host)) return;
+    const url = `${(req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0]}://${host}`;
+    db.settings.set('public_url', url).catch(() => {});
+  }
+  const publicUrl = async () => process.env.PUBLIC_URL || (await db.settings.get('public_url')) || '';
+
+  async function sendReminders(program, s) {
+    if (!smtpConfigured()) { console.log(`[schedule] no SMTP — reminder for "${s.name}" skipped`); return 0; }
+    const dir = await dirMap();
+    const emails = new Set();
+    for (const r of roomsOf(await db.programStudents.byProgram(program.id), dir)) for (const f of r.faculty) { const e = dir.get(f.key)?.email; if (e) emails.add(e.trim().toLowerCase()); }
+    if (!emails.size) return 0;
+    const base = await publicUrl();
+    const link = base ? `${base}/${s.kind === 'review' ? 'hackathon-review' : 'attendance'}` : '';
+    const what = s.kind === 'review' ? 'Hackathon review' : 'Attendance';
+    const subject = `${what} opens at ${clock(s.startTime)} — ${program.title} · ${s.name}`;
+    const text = [
+      'Dear Faculty,', '',
+      `${what} for ${program.title} — ${s.name} opens in 5 minutes.`, '',
+      `Date: ${longDate(s.date)}`,
+      `Window: ${clock(s.startTime)} to ${clock(s.endTime)} (rooms close automatically at ${clock(s.endTime)})`, '',
+      link ? `Open: ${link}` : '',
+      'Sign in with your Emp ID or KL email, enter the code sent to your email, and you will see your room(s).',
+      s.kind === 'attendance' ? 'Mark Present for each student and submit once per room.' : 'Enter the batch number and marks for each team, then save.', '',
+      'KL Skill Development',
+    ].filter((l) => l !== null).join('\n');
+    // Microsoft 365 allows ~30 messages a minute, so send one message per 40 faculty in Bcc.
+    const list = [...emails]; let sent = 0;
+    for (let i = 0; i < list.length; i += 40) {
+      await sendMail({ to: smtpUser(), bcc: list.slice(i, i + 40), subject, text });
+      sent += Math.min(40, list.length - i);
+    }
+    return sent;
+  }
+
+  async function scheduleTick(now = Date.now()) {
+    for (const program of await db.programs.all()) {
+      for (const s of await db.programSessions.byProgram(program.id)) {
+        if (!s.auto) continue;
+        const w = windowOf(s); if (!w) continue;
+        const st = s.autoState || '';
+        if (now >= w.end) {
+          if (st === 'closed' || !(await db.programSessions.claimAutoState(s.id, st, 'closed'))) continue;
+          if (st === 'opened') { await db.programSessions.update(s.id, { openRooms: [] }); console.log(`[schedule] closed all rooms · ${program.title} · ${s.name}`); }
+        } else if (now >= w.start) {
+          if (st === 'opened' || !(await db.programSessions.claimAutoState(s.id, st, 'opened'))) continue;
+          const rooms = roomsOf(await db.programStudents.byProgram(program.id)).map((r) => r.room);
+          const fresh = await db.programSessions.get(s.id);
+          await db.programSessions.update(s.id, { openRooms: [...new Set([...(fresh?.openRooms || []), ...rooms])] });
+          console.log(`[schedule] opened ${rooms.length} room(s) · ${program.title} · ${s.name}`);
+        } else if (now >= w.start - REMIND_MS && st === '') {
+          if (!(await db.programSessions.claimAutoState(s.id, '', 'reminded'))) continue;
+          sendReminders(program, s)
+            .then((n) => console.log(`[schedule] reminder sent to ${n} faculty · ${program.title} · ${s.name}`))
+            .catch((e) => console.error('[schedule] reminder failed:', e.message));
+        }
+      }
+    }
+  }
+  setInterval(() => scheduleTick().catch((e) => console.error('[schedule]', e.message)), 20_000).unref?.();
+  setTimeout(() => scheduleTick().catch((e) => console.error('[schedule]', e.message)), 3_000).unref?.();
+
   // ---------- rooms & batches ----------
   /** Group a roster into rooms: label, faculty (1..5), students, batches, reviewer load. */
   function roomsOf(students, dir = new Map()) {
@@ -323,15 +406,36 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     const kind = String(req.body?.kind || '');
     if (!KINDS.includes(kind)) return res.status(400).json({ error: 'kind must be attendance or review' });
     const count = (await db.programSessions.byProgram(p.id)).filter((s) => s.kind === kind).length;
-    const s = { id: crypto.randomUUID(), programId: p.id, kind, name: txt(req.body?.name) || (kind === 'review' ? `Review ${count + 1}` : `Session ${count + 1}`), date: txt(req.body?.date, 16), startTime: txt(req.body?.startTime, 8), endTime: txt(req.body?.endTime, 8), openRooms: [], createdAt: new Date().toISOString() };
+    const s = { id: crypto.randomUUID(), programId: p.id, kind, name: txt(req.body?.name) || (kind === 'review' ? `Review ${count + 1}` : `Session ${count + 1}`), date: txt(req.body?.date, 16), startTime: txt(req.body?.startTime, 8), endTime: txt(req.body?.endTime, 8), openRooms: [], auto: !!req.body?.auto, autoState: '', createdAt: new Date().toISOString() };
+    rememberPublicUrl(req);
     await db.programSessions.add(s); res.json(s);
   });
   app.post('/api/admin/program-sessions/:sid', requireAdmin, async (req, res) => {
+    const cur = await db.programSessions.get(req.params.sid);
+    if (!cur) return res.status(404).json({ error: 'Session not found' });
     const patch = {};
     for (const [k, n] of [['name', 190], ['date', 16], ['startTime', 8], ['endTime', 8]]) if (typeof req.body?.[k] === 'string') patch[k] = txt(req.body[k], n);
-    const s = await db.programSessions.update(req.params.sid, patch);
-    if (!s) return res.status(404).json({ error: 'Session not found' });
-    res.json(s);
+    if (typeof req.body?.auto === 'boolean') patch.auto = req.body.auto;
+    // A new time (or switching auto on) re-arms the schedule; a session already opened by it
+    // stays opened so rooms the admin closed by hand are not reopened.
+    if (['date', 'startTime', 'endTime', 'auto'].some((k) => k in patch && patch[k] !== cur[k])) {
+      const w = windowOf({ ...cur, ...patch }), now = Date.now();
+      if (!w || now < w.start) patch.autoState = '';
+      else if (now < w.end) patch.autoState = cur.autoState === 'opened' ? 'opened' : '';
+    }
+    rememberPublicUrl(req);
+    res.json(await db.programSessions.update(cur.id, patch));
+  });
+
+  /** Schedule overview for the admin: every session's window and what the scheduler will do next. */
+  app.get('/api/admin/program-schedule', requireAdmin, async (_req, res) => {
+    const now = Date.now(), out = [];
+    for (const p of await db.programs.all()) for (const s of await db.programSessions.byProgram(p.id)) {
+      const w = windowOf(s);
+      out.push({ programId: p.id, programTitle: p.title, id: s.id, kind: s.kind, name: s.name, date: s.date, startTime: s.startTime, endTime: s.endTime, auto: s.auto, autoState: s.autoState, openRooms: (s.openRooms || []).length, start: w ? new Date(w.start).toISOString() : null, end: w ? new Date(w.end).toISOString() : null, phase: !w ? 'no-time' : now < w.start ? 'upcoming' : now < w.end ? 'live' : 'over' });
+    }
+    out.sort((a, b) => String(a.start || '').localeCompare(String(b.start || '')));
+    res.json({ now: new Date(now).toISOString(), remindMinutes: REMIND_MS / 60_000, email: smtpConfigured(), sessions: out });
   });
   app.post('/api/admin/program-sessions/:sid/delete', requireAdmin, async (req, res) => {
     const ctx = await loadSession(req, res); if (!ctx) return;

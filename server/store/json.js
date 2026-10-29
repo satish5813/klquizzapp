@@ -325,6 +325,7 @@ export const jsonDb = {
     add: async (s) => { const cur = read('programSessions'); cur.push(s); write('programSessions', cur); return s; },
     update: async (id, p) => { const cur = read('programSessions'); const i = cur.findIndex((s) => s.id === id); if (i === -1) return null; cur[i] = { ...cur[i], ...p }; write('programSessions', cur); return cur[i]; },
     remove: async (id) => write('programSessions', read('programSessions').filter((s) => s.id !== id)),
+    claimAutoState: async (id, from, to) => { const cur = read('programSessions'); const s = cur.find((x) => x.id === id); if (!s || (s.autoState || '') !== from) return false; s.autoState = to; write('programSessions', cur); return true; },
   },
   programAttendance: {
     bySession: async (sid) => read('programAttendance').filter((a) => a.sessionId === sid),

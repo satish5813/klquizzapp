@@ -136,6 +136,9 @@ export async function makeMysqlDb() {
       "ALTER TABLE program_students ADD COLUMN course_code VARCHAR(32) DEFAULT ''",
       "ALTER TABLE program_students ADD COLUMN course_name VARCHAR(255) DEFAULT ''",
       "ALTER TABLE program_students ADD COLUMN reviewer VARCHAR(190) DEFAULT ''",
+      // sessions that open and close their rooms on their own date and times
+      'ALTER TABLE program_sessions ADD COLUMN auto_sched TINYINT NOT NULL DEFAULT 0',
+      "ALTER TABLE program_sessions ADD COLUMN auto_state VARCHAR(16) NOT NULL DEFAULT ''",
     ]) { try { await q(alter); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; } }
     await q('ALTER TABLE program_attendance MODIFY emp_id VARCHAR(190)');
     await q('ALTER TABLE program_scores MODIFY by_emp VARCHAR(190)');
@@ -219,7 +222,7 @@ export async function makeMysqlDb() {
   const toCProject = (r) => ({ id: r.id, courseCode: r.course_code, courseName: r.course_name || '', projectId: r.project_id || '', title: r.title || '', domain: r.domain || '' });
   const toFac = (r) => ({ key: r.fkey, name: r.name || '', email: r.email || '', empId: r.emp_id || '', updatedAt: r.updated_at });
   const toAuth = (r) => ({ id: r.id, fkey: r.fkey, kind: r.kind, secretHash: r.secret_hash, expiresAt: r.expires_at, attempts: r.attempts ?? 0, createdAt: r.created_at });
-  const toPSession = (r) => ({ id: r.id, programId: r.program_id, kind: r.kind, name: r.name || '', date: r.session_date || '', startTime: r.start_time || '', endTime: r.end_time || '', openRooms: Array.isArray(r.open_rooms) ? r.open_rooms : [], createdAt: r.created_at });
+  const toPSession = (r) => ({ id: r.id, programId: r.program_id, kind: r.kind, name: r.name || '', date: r.session_date || '', startTime: r.start_time || '', endTime: r.end_time || '', openRooms: Array.isArray(r.open_rooms) ? r.open_rooms : [], auto: !!r.auto_sched, autoState: r.auto_state || '', createdAt: r.created_at });
   const toPAtt = (r) => ({ sessionId: r.session_id, room: r.room, programId: r.program_id, roomLabel: r.room_label || '', empId: r.emp_id || '', facultyName: r.faculty_name || '', marks: r.marks || {}, present: r.present ?? 0, absent: r.absent ?? 0, total: r.total ?? 0, postedAt: r.posted_at });
   const toPScore = (r) => ({ sessionId: r.session_id, reg: r.reg, programId: r.program_id, room: r.room || '', present: !!r.present, scores: r.scores || {}, total: r.total ?? 0, byEmp: r.by_emp || '', postedAt: r.posted_at });
 
@@ -609,15 +612,17 @@ export async function makeMysqlDb() {
     programSessions: {
       byProgram: async (pid) => (await q('SELECT * FROM program_sessions WHERE program_id=? ORDER BY created_at', [pid])).map(toPSession),
       get: async (id) => { const r = await q('SELECT * FROM program_sessions WHERE id=?', [id]); return r[0] ? toPSession(r[0]) : null; },
-      add: async (s) => { await q('INSERT INTO program_sessions (id, program_id, kind, name, session_date, start_time, end_time, open_rooms, created_at) VALUES (?,?,?,?,?,?,?,?,?)', [s.id, s.programId, s.kind, s.name, s.date, s.startTime, s.endTime, J(s.openRooms || []), s.createdAt]); return s; },
+      add: async (s) => { await q('INSERT INTO program_sessions (id, program_id, kind, name, session_date, start_time, end_time, open_rooms, auto_sched, auto_state, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)', [s.id, s.programId, s.kind, s.name, s.date, s.startTime, s.endTime, J(s.openRooms || []), s.auto ? 1 : 0, s.autoState || '', s.createdAt]); return s; },
       update: async (id, p) => {
-        const map = { name: 'name', date: 'session_date', startTime: 'start_time', endTime: 'end_time', openRooms: 'open_rooms' };
+        const map = { name: 'name', date: 'session_date', startTime: 'start_time', endTime: 'end_time', openRooms: 'open_rooms', auto: 'auto_sched', autoState: 'auto_state' };
         const sets = [], vals = [];
-        for (const [k, v] of Object.entries(p)) { if (!map[k]) continue; sets.push(`${map[k]}=?`); vals.push(k === 'openRooms' ? J(v) : v); }
+        for (const [k, v] of Object.entries(p)) { if (!map[k]) continue; sets.push(`${map[k]}=?`); vals.push(k === 'openRooms' ? J(v) : k === 'auto' ? (v ? 1 : 0) : v); }
         if (sets.length) { vals.push(id); await q(`UPDATE program_sessions SET ${sets.join(', ')} WHERE id=?`, vals); }
         const r = await q('SELECT * FROM program_sessions WHERE id=?', [id]); return r[0] ? toPSession(r[0]) : null;
       },
       remove: async (id) => { await q('DELETE FROM program_sessions WHERE id=?', [id]); },
+      /** Move the schedule state only if nobody else has (all cluster workers run the scheduler). */
+      claimAutoState: async (id, from, to) => (await q('UPDATE program_sessions SET auto_state=? WHERE id=? AND auto_state=?', [to, id, from])).affectedRows === 1,
     },
     programAttendance: {
       bySession: async (sid) => (await q('SELECT * FROM program_attendance WHERE session_id=?', [sid])).map(toPAtt),

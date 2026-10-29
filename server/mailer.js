@@ -22,11 +22,11 @@ function getTransport() {
   return transport;
 }
 
-export async function sendMail({ to, subject, text, html }) {
+export async function sendMail({ to, bcc, subject, text, html }) {
   if (!smtpConfigured()) throw new Error('Email is not configured on the server (SMTP_USER / SMTP_PASS).');
   const from = process.env.SMTP_FROM || `KL Skill Development <${process.env.SMTP_USER}>`;
   try {
-    return await getTransport().sendMail({ from, to, subject, text, html });
+    return await getTransport().sendMail({ from, to, bcc, subject, text, html });
   } catch (e) {
     transport = null; // rebuild on next attempt (e.g. after a credentials fix)
     // Microsoft 365 returns 535 when SMTP AUTH is disabled for the mailbox or the password is wrong.
