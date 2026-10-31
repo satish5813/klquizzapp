@@ -8,6 +8,7 @@ import AttendanceAdmin from './pages/AttendanceAdmin';
 import Review from './pages/Review';
 import ReviewAdmin from './pages/ReviewAdmin';
 import FacultyRooms from './pages/FacultyRooms';
+import CertExam from './pages/CertExam';
 
 // Two logos: drop your images at public/logo-left.png and public/logo-right.png.
 // If a file is missing it falls back to a styled badge so the layout never breaks.
@@ -29,8 +30,8 @@ function Logo({ src, fallback }: { src: string; fallback: string }) {
 }
 
 export default function App() {
-  // the faculty attendance / review tables need the full screen width
-  const wide = ['/attendance', '/hackathon-review'].includes(useLocation().pathname);
+  // the faculty attendance / review tables and the certification paper need the full screen width
+  const wide = ['/attendance', '/hackathon-review', '/cert'].includes(useLocation().pathname);
   const shell = wide ? 'max-w-none' : 'max-w-5xl';
   return (
     <div className="min-h-screen">
@@ -56,6 +57,7 @@ export default function App() {
           <Route path="/review-admin" element={<ReviewAdmin />} />
           <Route path="/attendance" element={<FacultyRooms key="attendance" kind="attendance" />} />
           <Route path="/hackathon-review" element={<FacultyRooms key="review" kind="review" />} />
+          <Route path="/cert" element={<CertExam />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

@@ -9,11 +9,24 @@ export default function Welcome() {
   const [agree, setAgree] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [certs, setCerts] = useState<{ title: string; startAt: string; state: string }[]>([]);
 
   useEffect(() => {
     if (!reg) { navigate('/'); return; }
     api.post<LoginResponse>('/api/login', { registrationNumber: reg }).then(setData).catch((e) => setError(e.message));
+    api.post<{ exams: { title: string; startAt: string; state: string }[] }>('/api/cert/exams', { reg }).then((r) => setCerts(r.exams)).catch(() => {});
   }, [reg, navigate]);
+
+  const certCard = certs.length > 0 && (
+    <button onClick={() => navigate('/cert')} className="card mx-auto flex w-full max-w-3xl items-center gap-3 text-left ring-2 ring-indigo-200 hover:bg-indigo-50/40">
+      <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-indigo-100 text-xl">🎓</span>
+      <span className="min-w-0 flex-1">
+        <span className="block font-semibold text-slate-800">Certification exam{certs.length > 1 ? 's' : ''}</span>
+        <span className="block truncate text-xs text-slate-500">{certs.map((c) => `${c.title} · ${new Date(c.startAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}`).join('  |  ')}</span>
+      </span>
+      <span className="text-sm font-semibold text-indigo-700">Open →</span>
+    </button>
+  );
 
   async function start() {
     setBusy(true); setError('');
@@ -49,6 +62,8 @@ export default function Welcome() {
 
   if (blocked) {
     return (
+      <div className="space-y-4">
+      {certCard}
       <div className="card mx-auto max-w-lg border-2 border-blue-200 text-center">
         <p className="text-5xl">{sch.reason === 'closed' ? '🔒' : sch.reason === 'not_scheduled' ? '🗓️' : '⏳'}</p>
         <h1 className="mt-2 text-xl font-bold text-blue-700">
@@ -67,11 +82,13 @@ export default function Welcome() {
           <button className="btn-ghost" onClick={() => { sessionStorage.removeItem('kl_reg'); navigate('/'); }}>Log out</button>
         </div>
       </div>
+      </div>
     );
   }
 
   return (
     <div className="space-y-3">
+      {certCard}
       <button onClick={() => { sessionStorage.removeItem('kl_reg'); navigate('/'); }}
         className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-teal-700">
         ← Back to login

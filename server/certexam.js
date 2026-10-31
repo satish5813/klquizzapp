@@ -527,7 +527,7 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
   app.post('/api/cert/exams', async (req, res) => {
     const reg = txt(req.body?.reg, 64);
     if (!reg) return res.status(400).json({ error: 'Enter your registration number.' });
-    const student = (await db.students.all()).find((s) => String(s.registrationNumber) === reg);
+    const student = await db.students.byRegNo(reg);
     if (!student) return res.status(404).json({ error: 'This registration number is not in the list. Please contact the coordinator.' });
     const t = now();
     const out = [];
@@ -561,10 +561,12 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
     if (exam.startAt && exam.startAt > t) return res.status(403).json({ error: 'The exam has not started yet.' });
     if (exam.endAt && exam.endAt < t) return res.status(403).json({ error: 'The exam is closed.' });
 
+    const aud = exam.audience || {};
+    if (aud.regs?.length && !aud.regs.includes(reg)) return res.status(403).json({ error: 'This exam is not assigned to your registration number.' });
     let attempt = await db.certAttempts.byExamReg(exam.id, reg);
     if (attempt && attempt.status !== 'in_progress') return res.status(409).json({ error: 'You have already finished this exam.', state: attempt.status });
     if (!attempt) {
-      const student = (await db.students.all()).find((s) => String(s.registrationNumber) === reg);
+      const student = await db.students.byRegNo(reg);
       if (!student) return res.status(404).json({ error: 'This registration number is not in the list.' });
       const built = await buildPaper(paper, reg);
       if (built.error) return res.status(400).json({ error: built.error });
