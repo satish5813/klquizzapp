@@ -199,6 +199,10 @@ export async function makeMysqlDb() {
       kind VARCHAR(32), seconds INT DEFAULT 0, item INT DEFAULT -1, detail JSON,
       INDEX ix_cev_attempt (attempt_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    // latest shared-screen frame per attempt (overwritten, so storage stays small)
+    await q(`CREATE TABLE IF NOT EXISTS cert_snaps (
+      attempt_id VARCHAR(64) PRIMARY KEY, image MEDIUMTEXT, at VARCHAR(32), reason VARCHAR(32) DEFAULT '', count INT DEFAULT 0
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 
     // migrate a pre-existing single-key (emp_id) table to the session-scoped composite key
     try { await q("ALTER TABLE attendance_postings ADD COLUMN session_id VARCHAR(64) NOT NULL DEFAULT ''"); }
@@ -542,6 +546,7 @@ export async function makeMysqlDb() {
       byExam: async (examId) => (await q('SELECT * FROM cert_attempts WHERE exam_id=? ORDER BY started_at', [examId])).map(toCAttempt),
       get: async (id) => { const r = await q('SELECT * FROM cert_attempts WHERE id=?', [id]); return r[0] ? toCAttempt(r[0]) : null; },
       byExamReg: async (examId, reg) => { const r = await q('SELECT * FROM cert_attempts WHERE exam_id=? AND reg=?', [examId, reg]); return r[0] ? toCAttempt(r[0]) : null; },
+      inProgress: async () => (await q("SELECT id, exam_id, started_at FROM cert_attempts WHERE status='in_progress'")).map((r) => ({ id: r.id, examId: r.exam_id, startedAt: r.started_at })),
       add: async (a) => {
         await q(`INSERT INTO cert_attempts (id, exam_id, reg, name, branch, section, items, answers, marked, score, total, status, reason, integrity, flags, ip, session_id, started_at, last_seen, submitted_at)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -568,6 +573,14 @@ export async function makeMysqlDb() {
       },
       byAttempt: async (attemptId) => (await q('SELECT * FROM cert_events WHERE attempt_id=? ORDER BY id', [attemptId]))
         .map((r) => ({ at: r.at, kind: r.kind, seconds: r.seconds, item: r.item, detail: r.detail || {} })),
+    },
+    certSnaps: {
+      set: async (attemptId, image, at, reason) => {
+        await q('INSERT INTO cert_snaps (attempt_id, image, at, reason, count) VALUES (?,?,?,?,1) ON DUPLICATE KEY UPDATE image=VALUES(image), at=VALUES(at), reason=VALUES(reason), count=count+1', [attemptId, image, at, reason || '']);
+      },
+      get: async (attemptId) => { const r = await q('SELECT * FROM cert_snaps WHERE attempt_id=?', [attemptId]); return r[0] ? { attemptId, image: r[0].image, at: r[0].at, reason: r[0].reason, count: r[0].count } : null; },
+      /** when each attempt last sent a frame (no image data) */
+      meta: async (ids) => (ids.length ? (await q('SELECT attempt_id, at, reason, count FROM cert_snaps WHERE attempt_id IN (?)', [ids])) : []).map((r) => ({ attemptId: r.attempt_id, at: r.at, reason: r.reason, count: r.count })),
     },
 
     // course-wise project register

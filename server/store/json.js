@@ -283,12 +283,18 @@ export const jsonDb = {
     byExam: async (examId) => read('certAttempts').filter((a) => a.examId === examId),
     get: async (id) => read('certAttempts').find((a) => a.id === id) || null,
     byExamReg: async (examId, reg) => read('certAttempts').find((a) => a.examId === examId && String(a.reg) === String(reg)) || null,
+    inProgress: async () => read('certAttempts').filter((a) => a.status === 'in_progress').map((a) => ({ id: a.id, examId: a.examId, startedAt: a.startedAt })),
     add: async (a) => { const cur = read('certAttempts'); cur.push(a); write('certAttempts', cur); return a; },
     update: async (id, p) => { const cur = read('certAttempts'); const i = cur.findIndex((a) => a.id === id); if (i === -1) return null; cur[i] = { ...cur[i], ...p }; write('certAttempts', cur); return cur[i]; },
   },
   certEvents: {
     add: async (attemptId, rows) => { const cur = read('certEvents'); rows.forEach((e) => cur.push({ attemptId, ...e })); write('certEvents', cur); return rows.length; },
     byAttempt: async (attemptId) => read('certEvents').filter((e) => e.attemptId === attemptId),
+  },
+  certSnaps: {
+    set: async (attemptId, image, at, reason) => { const cur = read('certSnaps'); const i = cur.findIndex((s) => s.attemptId === attemptId); const prev = i === -1 ? null : cur[i]; const row = { attemptId, image, at, reason: reason || '', count: (prev?.count || 0) + 1 }; if (i === -1) cur.push(row); else cur[i] = row; write('certSnaps', cur); },
+    get: async (attemptId) => read('certSnaps').find((s) => s.attemptId === attemptId) || null,
+    meta: async (ids) => read('certSnaps').filter((s) => ids.includes(s.attemptId)).map(({ image, ...m }) => m),
   },
 
   // course-wise project register

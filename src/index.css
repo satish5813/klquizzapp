@@ -12,3 +12,10 @@ body { @apply bg-slate-50 text-slate-800 antialiased; }
   .card { @apply rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-100; }
   .label { @apply mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500; }
 }
+
+/* certificate / result statement prints on one A4 page with its colours */
+@media print {
+  @page { size: A4 landscape; margin: 8mm; }
+  body { -webkit-print-color-adjust: exact; print-color-adjust: exact; background: #fff; }
+  main { padding: 0 !important; }
+}

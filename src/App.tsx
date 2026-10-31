@@ -35,7 +35,7 @@ export default function App() {
   const shell = wide ? 'max-w-none' : 'max-w-5xl';
   return (
     <div className="min-h-screen">
-      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/85 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/85 backdrop-blur print:hidden">
         <div className={`mx-auto flex ${shell} items-center justify-between gap-3 px-4 py-2.5`}>
           <Logo src="/logo-left.png" fallback="KL" />
           <Link to="/" className="text-center leading-tight">

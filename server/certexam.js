@@ -16,9 +16,14 @@ const DEFAULT_RULES = {
   fullscreen: true, warnings: 2, autoSubmitOnBreach: true,
   back: true, oneAtATime: true, shuffleQuestions: true, shuffleOptions: true,
   showResult: true, negativeMarking: 0,
+  screenShare: true, // the student shares the entire screen; a frame is sent to the monitor every ~45s
+  submitLastMin: 5, // Submit unlocks only in the last N minutes (0 = any time)
 };
 // how much each proctoring flag costs the integrity score
-const PENALTY = { blur_short: 2, blur_long: 6, fullscreen_exit: 10, paste: 8, copy: 2, second_display: 10, devtools: 15, offline: 3, quick_answer_after_away: 20, resize: 2 };
+const PENALTY = { blur_short: 2, blur_long: 6, fullscreen_exit: 10, paste: 8, copy: 2, second_display: 10, devtools: 15, offline: 3, quick_answer_after_away: 20, resize: 2, screen_share_stopped: 10 };
+const GRACE_MS = 60_000; // after the deadline the server closes the attempt itself
+/** When this attempt must end: its own clock, or the sitting's window, whichever is first. */
+const deadlineOf = (a, paper, exam) => Math.min(new Date(a.startedAt).getTime() + (paper?.durationMin || 60) * 60000, exam?.endAt ? new Date(exam.endAt).getTime() : Infinity);
 
 export function registerCertExamRoutes(app, { db, requireAdmin }) {
   const now = () => new Date().toISOString();
@@ -480,7 +485,9 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
     if (!exam) return res.status(404).json({ error: 'Exam not found' });
     const paper = await db.certPapers.get(exam.paperId);
     const attempts = await db.certAttempts.byExam(exam.id);
+    const snaps = new Map((await db.certSnaps.meta(attempts.map((a) => a.id))).map((s) => [s.attemptId, s]));
     const rows = attempts.map((a) => ({
+      snapAt: snaps.get(a.id)?.at || null, snapCount: snaps.get(a.id)?.count || 0,
       reg: a.reg, name: a.name, branch: a.branch, section: a.section, status: a.status, reason: a.reason,
       answered: Object.keys(a.answers || {}).length, items: (a.items || []).length,
       score: a.score, total: a.total, integrity: a.integrity ?? 100, flags: a.flags || {},
@@ -543,7 +550,7 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
       out.push({
         id: e.id, title: e.title, courseCode: e.courseCode, startAt: e.startAt, endAt: e.endAt, open,
         durationMin: paper?.durationMin || 0, passMark: paper?.passMark ?? 0, questions: (paper?.blueprint || []).reduce((n, s) => n + s.count, 0),
-        rules: paper?.rules || DEFAULT_RULES,
+        rules: { ...DEFAULT_RULES, ...(paper?.rules || {}) },
         state: attempt ? attempt.status : 'none', score: attempt?.score ?? null, total: attempt?.total ?? null,
       });
     }
@@ -590,7 +597,7 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
       exam.endAt ? new Date(exam.endAt).getTime() : Infinity,
     )).toISOString();
     return {
-      attemptId: a.id, examTitle: exam.title, courseCode: exam.courseCode, paperName: paper.name,
+      attemptId: a.id, examId: exam.id, reg: a.reg, examTitle: exam.title, courseCode: exam.courseCode, paperName: paper.name,
       rules: { ...DEFAULT_RULES, ...(paper.rules || {}) }, passMark: paper.passMark, durationMin: paper.durationMin,
       startedAt: a.startedAt, endsAt, serverNow: now(), total: a.total,
       items: a.items.map((it, i) => ({ no: i + 1, section: it.section, caseId: it.caseId, type: it.type, marks: it.marks, question: it.question, options: it.options })),
@@ -604,6 +611,7 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
     const a = await db.certAttempts.get(txt(req.body?.attemptId, 64));
     if (!a) return res.status(404).json({ error: 'Attempt not found' });
     if (a.status !== 'in_progress') return res.status(409).json({ error: 'This attempt is already closed.', state: a.status });
+    if (await closeIfLate(a)) return res.status(409).json({ error: 'Time is up — this attempt is already closed.', state: 'submitted' });
     const answers = { ...(a.answers || {}) };
     for (const [k, v] of Object.entries(req.body?.answers || {})) {
       const i = Number(k); if (!Number.isInteger(i) || i < 0 || i >= a.items.length) continue;
@@ -633,7 +641,7 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
       integrity -= PENALTY[kind] || 0;
     }
     integrity = Math.max(0, Math.min(100, integrity));
-    const breaches = (flags.fullscreen_exit || 0) + (flags.blur_long || 0);
+    const breaches = (flags.fullscreen_exit || 0) + (flags.blur_long || 0) + (flags.screen_share_stopped || 0);
     const patch = { flags, integrity, lastSeen: now() };
 
     // fullscreen rule: warn, warn, then end the attempt
@@ -651,24 +659,63 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
     });
   });
 
-  /** Mark the paper. Multi-select must match exactly (no part marks). */
-  async function gradeOf(a, status, reason) {
+  /** Per-section marks: [{ name, score, total, correct, count, attempted }]. Multi-select must match exactly. */
+  async function markSheet(a) {
     const bank = new Map((await db.certQuestions.byIds(a.items.map((i) => i.id))).map((q) => [q.id, q]));
-    let score = 0;
+    const sections = new Map(); let score = 0;
     a.items.forEach((it, i) => {
+      const s = sections.get(it.section) || { name: it.section, score: 0, total: 0, correct: 0, count: 0, attempted: 0 };
+      sections.set(it.section, s);
+      const m = it.marks || 1; s.total += m; s.count++;
+      const got = ok(a.answers?.[String(i)]).slice().sort((x, y) => x - y);
+      if (got.length) s.attempted++;
       const q = bank.get(it.id); if (!q) return;
       const want = q.answers.map((idx) => it.order.indexOf(idx)).sort((x, y) => x - y);
-      const got = ok(a.answers?.[String(i)]).slice().sort((x, y) => x - y);
-      if (got.length === want.length && got.every((v, k) => v === want[k])) score += it.marks || 1;
+      if (got.length === want.length && got.every((v, k) => v === want[k])) { s.score += m; s.correct++; score += m; }
     });
+    return { score, sections: [...sections.values()] };
+  }
+  async function gradeOf(a, status, reason) {
+    const { score } = await markSheet(a);
     return { score, status, reason: reason || '', submittedAt: now() };
   }
+
+  /** Close an attempt whose time ran out (browser closed, or never sent the submit). */
+  async function closeIfLate(a, exam, paper) {
+    exam = exam || await db.certExams.get(a.examId);
+    paper = paper || (exam ? await db.certPapers.get(exam.paperId) : null);
+    if (Date.now() < deadlineOf(a, paper, exam) + GRACE_MS) return false;
+    const full = a.items ? a : await db.certAttempts.get(a.id);
+    if (!full || full.status !== 'in_progress') return true;
+    await db.certAttempts.update(full.id, await gradeOf(full, 'submitted', 'time_up_server'));
+    return true;
+  }
+  // every 30s: auto-submit attempts that are past their deadline
+  const sweep = async () => {
+    try {
+      const cache = new Map();
+      for (const a of await db.certAttempts.inProgress()) {
+        if (!cache.has(a.examId)) { const exam = await db.certExams.get(a.examId); cache.set(a.examId, { exam, paper: exam ? await db.certPapers.get(exam.paperId) : null }); }
+        const { exam, paper } = cache.get(a.examId);
+        await closeIfLate(a, exam, paper);
+      }
+    } catch (e) { console.error('[cert sweep]', e.message); }
+  };
+  setInterval(sweep, 30_000).unref?.();
 
   app.post('/api/cert/submit', async (req, res) => {
     const a = await db.certAttempts.get(txt(req.body?.attemptId, 64));
     if (!a) return res.status(404).json({ error: 'Attempt not found' });
     if (a.status !== 'in_progress') return res.status(409).json({ error: 'Already submitted.', state: a.status, score: a.score, total: a.total });
-    const graded = await gradeOf(a, 'submitted', txt(req.body?.reason, 64));
+    const reason = txt(req.body?.reason, 64);
+    {
+      const exam = await db.certExams.get(a.examId);
+      const paper = exam ? await db.certPapers.get(exam.paperId) : null;
+      const lastMin = Number({ ...DEFAULT_RULES, ...(paper?.rules || {}) }.submitLastMin) || 0;
+      const left = deadlineOf(a, paper, exam) - Date.now();
+      if (lastMin && reason !== 'time_up' && left > lastMin * 60000 + 15000) return res.status(403).json({ error: `Submit opens in the last ${lastMin} minutes of the exam.` });
+    }
+    const graded = await gradeOf(a, 'submitted', reason);
     const saved = await db.certAttempts.update(a.id, graded);
     const exam = await db.certExams.get(a.examId);
     const paper = exam ? await db.certPapers.get(exam.paperId) : null;
@@ -678,6 +725,48 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
       passMark: paper?.passMark ?? 0, passed: pctScore >= (paper?.passMark ?? 0),
       showResult: (paper?.rules || DEFAULT_RULES).showResult !== false, integrity: saved.integrity,
     });
+  });
+
+  /** A frame of the student's shared screen (small JPEG data URL). Only the latest is kept. */
+  app.post('/api/cert/snap', async (req, res) => {
+    const a = await db.certAttempts.get(txt(req.body?.attemptId, 64));
+    if (!a) return res.status(404).json({ error: 'Attempt not found' });
+    if (a.status !== 'in_progress') return res.status(409).json({ error: 'This attempt is already closed.', state: a.status });
+    const image = String(req.body?.image || '');
+    if (!/^data:image\/(jpeg|webp|png);base64,/.test(image) || image.length > 400_000) return res.status(400).json({ error: 'Bad frame' });
+    await db.certSnaps.set(a.id, image, now(), txt(req.body?.reason, 32));
+    res.json({ ok: true });
+  });
+
+  /** Result sheet / certificate data for a finished attempt. */
+  app.post('/api/cert/result', async (req, res) => {
+    const reg = txt(req.body?.reg, 64);
+    const exam = await db.certExams.get(txt(req.body?.examId, 64));
+    if (!exam) return res.status(404).json({ error: 'Exam not found' });
+    const a = await db.certAttempts.byExamReg(exam.id, reg);
+    if (!a) return res.status(404).json({ error: 'No attempt found for this exam.' });
+    if (a.status === 'in_progress') return res.status(409).json({ error: 'The exam is still in progress.' });
+    const paper = await db.certPapers.get(exam.paperId);
+    const rules = { ...DEFAULT_RULES, ...(paper?.rules || {}) };
+    if (rules.showResult === false) return res.json({ hidden: true, status: a.status });
+    const [course, sheet] = await Promise.all([db.certCourses.get(exam.courseCode), markSheet(a)]);
+    const percentage = a.total ? Math.round((a.score / a.total) * 1000) / 10 : 0;
+    const passMark = paper?.passMark ?? 0;
+    res.json({
+      status: a.status, reason: a.reason, passed: a.status === 'submitted' && percentage >= passMark,
+      student: { reg: a.reg, name: a.name, branch: a.branch, section: a.section },
+      exam: { id: exam.id, title: exam.title, courseCode: exam.courseCode, courseName: course?.name || '', certName: course?.certName || '', paperName: paper?.name || '' },
+      score: a.score, total: a.total, percentage, passMark, durationMin: paper?.durationMin || 0,
+      sections: sheet.sections, startedAt: a.startedAt, submittedAt: a.submittedAt,
+      certificateNo: `KLSD-${exam.courseCode}-${String(a.reg).slice(-6)}-${a.id.slice(0, 6).toUpperCase()}`,
+    });
+  });
+
+  /** Admin: the latest screen frame of one attempt. */
+  app.get('/api/admin/cert/snaps/:attemptId', requireAdmin, async (req, res) => {
+    const s = await db.certSnaps.get(txt(req.params.attemptId, 64));
+    if (!s) return res.status(404).json({ error: 'No screen frame received yet.' });
+    res.json(s);
   });
 
   /** Resume after a refresh or a dropped connection. */
