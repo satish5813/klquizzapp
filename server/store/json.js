@@ -74,6 +74,7 @@ export const jsonDb = {
     count: async () => read('students').length,
     get: async (id) => read('students').find((s) => s.id === id) || null,
     byRegNo: async (rn) => read('students').find((s) => s.registrationNumber === rn) || null,
+    byRegNos: async (rns) => { const want = new Set(rns.map(String)); return read('students').filter((s) => want.has(String(s.registrationNumber))); },
     byEmpId: async (empId) => read('students').filter((s) => String(s.empId || '') === String(empId)).sort((a, b) => String(a.registrationNumber).localeCompare(String(b.registrationNumber))),
     add: async (s) => { const cur = read('students'); cur.push(s); write('students', cur); return s; },
     update: async (id, patch) => {

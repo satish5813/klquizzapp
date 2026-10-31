@@ -439,14 +439,38 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
   }
 
   // ---------------- scheduling ----------------
+  /** Students a sitting is meant for: its reg list, else everyone in its sections / branches. */
+  async function eligibleOf(e, rosterCache) {
+    const aud = e.audience || {};
+    if (aud.regs?.length) {
+      const found = await db.students.byRegNos(aud.regs);
+      const have = new Set(found.map((s) => String(s.registrationNumber)));
+      return [...found, ...aud.regs.filter((r) => !have.has(String(r))).map((r) => ({ registrationNumber: r, name: '', branch: '', section: '' }))];
+    }
+    if (!aud.sections?.length && !aud.branches?.length) return [];
+    if (!rosterCache.all) rosterCache.all = await db.students.all();
+    return rosterCache.all.filter((s) => (!aud.sections?.length || aud.sections.includes(s.section)) && (!aud.branches?.length || aud.branches.includes(s.branch)));
+  }
+  /** Eligible students with no attempt at all in this sitting. */
+  async function notStartedOf(e, rosterCache = {}) {
+    const [eligible, attempts] = await Promise.all([eligibleOf(e, rosterCache), db.certAttempts.byExam(e.id)]);
+    const started = new Set(attempts.map((a) => String(a.reg)));
+    return { eligible: eligible.length, rows: eligible.filter((s) => !started.has(String(s.registrationNumber))).map((s) => ({ reg: s.registrationNumber, name: s.name, branch: s.branch, section: s.section })).sort((a, b) => String(a.reg).localeCompare(String(b.reg))) };
+  }
+
   app.get('/api/admin/cert/exams', requireAdmin, async (_req, res) => {
     const exams = await db.certExams.all();
-    const out = [];
+    const out = []; const roster = {};
+    const covered = new Map(); // sitting id -> regs already given a re-exam for it
+    for (const x of exams) for (const id of x.audience?.reexamOf || []) { if (!covered.has(id)) covered.set(id, new Set()); for (const r of x.audience.regs || []) covered.get(id).add(String(r)); }
     for (const e of exams) {
       const [paper, attempts] = await Promise.all([db.certPapers.get(e.paperId), db.certAttempts.byExam(e.id)]);
       const done = attempts.filter((a) => a.status === 'submitted');
+      const eligible = e.audience?.regs?.length ? e.audience.regs.length : (await eligibleOf(e, roster)).length;
+      const reexamed = covered.has(e.id) ? (await notStartedOf(e, roster)).rows.filter((r) => covered.get(e.id).has(String(r.reg))).length : 0;
       out.push({
         ...e, paperName: paper?.name || '', durationMin: paper?.durationMin || 0, passMark: paper?.passMark ?? 0,
+        eligible, notStarted: Math.max(0, eligible - attempts.length), reexamed, closed: !!e.endAt && Date.parse(e.endAt) < Date.now(),
         attempts: attempts.length, submitted: done.length, inProgress: attempts.length - done.length,
         avgScore: done.length ? Math.round((done.reduce((n, a) => n + (a.score || 0), 0) / done.length) * 10) / 10 : null,
         flagged: attempts.filter((a) => (a.integrity ?? 100) < 85).length,
@@ -479,6 +503,44 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
     res.json({ ok: true });
   });
 
+  /** Re-exam: one new sitting with everyone who never started the chosen (closed) sittings.
+   *  { sourceIds: [...], paperId?, title, startAt, endAt } */
+  app.post('/api/admin/cert/reexam', requireAdmin, async (req, res) => {
+    const ids = ok(req.body?.sourceIds).map((x) => txt(x, 64)).filter(Boolean);
+    if (!ids.length) return res.status(400).json({ error: 'Pick at least one sitting.' });
+    const sources = (await Promise.all(ids.map((id) => db.certExams.get(id)))).filter(Boolean);
+    if (sources.length !== ids.length) return res.status(404).json({ error: 'A chosen sitting was not found.' });
+    const course = sources[0].courseCode;
+    if (sources.some((s) => s.courseCode !== course)) return res.status(400).json({ error: 'All chosen sittings must be for the same course.' });
+    const open = sources.filter((s) => !s.endAt || !(Date.parse(s.endAt) < Date.now()));
+    if (open.length) return res.status(400).json({ error: `Wait until these sittings close: ${open.map((s) => s.title).join(', ')}` });
+    const startAt = txt(req.body?.startAt, 32), endAt = txt(req.body?.endAt, 32);
+    if (!(Date.parse(endAt) > Date.parse(startAt))) return res.status(400).json({ error: 'Give the re-exam a start and an end time (end after start).' });
+    const paper = await db.certPapers.get(txt(req.body?.paperId, 64) || sources[0].paperId);
+    if (!paper || paper.courseCode !== course) return res.status(400).json({ error: 'Pick a paper of the same course.' });
+    const chk = await checkPaper(paper);
+    if (!chk.ready) return res.status(400).json({ error: `This paper cannot be filled from the bank — ${chk.problems.join('; ')}` });
+
+    // anyone who started ANY of the sources is not absent, even if listed in another source
+    const startedAnywhere = new Set();
+    for (const s of sources) for (const a of await db.certAttempts.byExam(s.id)) startedAnywhere.add(String(a.reg));
+    // ...and anyone already given a re-exam for one of these sittings is not given a second one
+    for (const x of await db.certExams.all()) if (x.audience?.reexamOf?.some((id) => ids.includes(id))) for (const r of x.audience.regs || []) startedAnywhere.add(String(r));
+    const regs = new Set(); const roster = {};
+    for (const s of sources) for (const r of (await notStartedOf(s, roster)).rows) if (!startedAnywhere.has(String(r.reg))) regs.add(String(r.reg));
+    if (!regs.size) return res.status(400).json({ error: 'Every absentee in these sittings has either started or already has a re-exam sitting.' });
+
+    const e = {
+      id: crypto.randomUUID(), paperId: paper.id, courseCode: course,
+      title: txt(req.body?.title, 255) || `${sources[0].title.split(' — ')[0]} — RE-EXAM`,
+      startAt, endAt, status: 'scheduled',
+      audience: { sections: [], branches: [], regs: [...regs], reexamOf: sources.map((s) => s.id) },
+      createdAt: now(),
+    };
+    await db.certExams.upsert(e);
+    res.json({ ...e, students: regs.size });
+  });
+
   /** Live view of one exam: who is writing, who finished, who is being flagged. */
   app.get('/api/admin/cert/exams/:id/monitor', requireAdmin, async (req, res) => {
     const exam = await db.certExams.get(txt(req.params.id, 64));
@@ -493,9 +555,11 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
       score: a.score, total: a.total, integrity: a.integrity ?? 100, flags: a.flags || {},
       startedAt: a.startedAt, lastSeen: a.lastSeen, submittedAt: a.submittedAt, id: a.id,
     })).sort((x, y) => (x.integrity - y.integrity) || String(x.reg).localeCompare(String(y.reg)));
+    const notStarted = await notStartedOf(exam);
     res.json({
-      exam, paper,
+      exam, paper, notStarted: notStarted.rows,
       summary: {
+        eligible: notStarted.eligible, notStarted: notStarted.rows.length,
         started: rows.length, writing: rows.filter((r) => r.status === 'in_progress').length,
         submitted: rows.filter((r) => r.status === 'submitted').length,
         terminated: rows.filter((r) => r.status === 'terminated').length,

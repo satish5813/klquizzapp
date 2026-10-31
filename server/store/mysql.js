@@ -286,6 +286,7 @@ export async function makeMysqlDb() {
       count: async () => (await q('SELECT COUNT(*) n FROM students'))[0].n,
       get: async (id) => { const r = await q('SELECT * FROM students WHERE id=?', [id]); return r[0] ? toStudent(r[0]) : null; },
       byRegNo: async (rn) => { const r = await q('SELECT * FROM students WHERE registration_number=?', [rn]); return r[0] ? toStudent(r[0]) : null; },
+      byRegNos: async (rns) => (rns.length ? (await q('SELECT * FROM students WHERE registration_number IN (?)', [rns])).map(toStudent) : []),
       byEmpId: async (empId) => (await q('SELECT * FROM students WHERE emp_id=? ORDER BY registration_number', [String(empId)])).map(toStudent),
       add: async (s) => { await q('INSERT INTO students (id, registration_number, name, branch, section, domain, emp_id, room, faculty_name, active, created_at) VALUES (?,?,?,?,?,?,?,?,?,1,?)', [s.id, s.registrationNumber, s.name, s.branch, s.section, s.domain || '', s.empId || '', s.room || '', s.facultyName || '', s.createdAt]); return s; },
       update: async (id, patch) => {
