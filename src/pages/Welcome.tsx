@@ -49,13 +49,16 @@ export default function Welcome() {
   if (a.state === 'completed') {
     const terminated = a.status === 'terminated';
     return (
+      <div className="space-y-4">
+      {certCard}
       <div className="card mx-auto max-w-lg border-2 border-amber-200 text-center">
         <p className="text-5xl">🔒</p>
-        <h1 className="mt-2 text-xl font-bold text-amber-700">Exam already completed</h1>
+        <h1 className="mt-2 text-xl font-bold text-amber-700">{certs.length ? 'Skill Palaver exam already completed' : 'Exam already completed'}</h1>
         <p className="mt-1 text-sm text-slate-600">{s.name} · {s.registrationNumber}</p>
         <p className={`my-3 text-4xl font-bold ${terminated ? 'text-red-700' : 'text-slate-800'}`}>{a.score} / {a.total}</p>
         <p className="text-sm text-slate-500">{terminated ? 'Recorded as 0 — the exam was terminated for a full-screen / focus violation.' : `Your recorded score (${a.percentage}%).`}</p>
         <button className="btn-ghost mt-4" onClick={() => { sessionStorage.removeItem('kl_reg'); navigate('/'); }}>Log out</button>
+      </div>
       </div>
     );
   }

@@ -39,9 +39,10 @@ export default function Login() {
       sessionStorage.setItem('kl_branch', r.student.branch || '');
       sessionStorage.setItem('kl_section', r.student.section || '');
       sessionStorage.setItem('kl_domain', r.student.domain || '');
-      // a certification exam that is open (or already started) takes priority over the domain quiz
-      const cert = await api.post<{ exams: { open: boolean; state: string }[] }>('/api/cert/exams', { reg: reg.trim() }).catch(() => null);
-      const certNow = cert?.exams.some((x) => x.state === 'in_progress' || (x.open && x.state === 'none'));
+      // a certification exam that is open, already started, or opening within 12 hours takes priority over the domain quiz
+      const cert = await api.post<{ exams: { open: boolean; state: string; startAt: string }[] }>('/api/cert/exams', { reg: reg.trim() }).catch(() => null);
+      const soon = (iso: string) => { const left = new Date(iso).getTime() - Date.now(); return left > 0 && left < 12 * 3600000; };
+      const certNow = cert?.exams.some((x) => x.state === 'in_progress' || (x.state === 'none' && (x.open || soon(x.startAt))));
       navigate(certNow ? '/cert' : '/welcome');
     } catch (err: any) { setError(err.message); setBusy(false); }
   }
