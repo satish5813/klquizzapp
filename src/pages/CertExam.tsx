@@ -77,6 +77,19 @@ export default function CertExam() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // logged in before the start time: refresh the list when the exam opens (spread over 15 s so
+  // every waiting student does not hit the server at once; keeps polling if this PC's clock runs fast)
+  useEffect(() => {
+    if (!list || view || picked) return;
+    const next = list.exams.filter((e) => !e.open && e.state === 'none' && e.startAt && new Date(e.startAt).getTime() > Date.now() - 10 * 60000)
+      .map((e) => new Date(e.startAt).getTime()).sort((a, b) => a - b)[0];
+    if (!next) return;
+    const wait = Math.min(Math.max(next - Date.now(), 15000) + Math.random() * 15000, 10 * 60000);
+    const t = setTimeout(() => loadList(), wait);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [list, view, picked]);
+
   async function start(exam: CertExamRow) {
     setBusy(true); setError('');
     goFull();
