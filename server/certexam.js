@@ -22,6 +22,7 @@ const DEFAULT_RULES = {
 // how much each proctoring flag costs the integrity score
 const PENALTY = { blur_short: 2, blur_long: 6, fullscreen_exit: 10, paste: 8, copy: 2, second_display: 10, devtools: 15, offline: 3, quick_answer_after_away: 20, resize: 2, screen_share_stopped: 10 };
 const GRACE_MS = 60_000; // after the deadline the server closes the attempt itself
+const TIME_UP_SLACK_MS = 60_000; // how early a browser's "time up" submit may arrive
 /** When this attempt must end: its own clock, or the sitting's window, whichever is first. */
 const deadlineOf = (a, paper, exam) => Math.min(new Date(a.startedAt).getTime() + (paper?.durationMin || 60) * 60000, exam?.endAt ? new Date(exam.endAt).getTime() : Infinity);
 
@@ -684,7 +685,7 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
     }
     const marked = ok(req.body?.marked).map(Number).filter((n) => Number.isInteger(n));
     await db.certAttempts.update(a.id, { answers, marked, lastSeen: now() });
-    res.json({ ok: true, answered: Object.keys(answers).length });
+    res.json({ ok: true, answered: Object.keys(answers).length, serverNow: now() });
   });
 
   /** Proctoring beacon: a batch of events, scored into the integrity number. */
@@ -777,6 +778,8 @@ export function registerCertExamRoutes(app, { db, requireAdmin }) {
       const paper = exam ? await db.certPapers.get(exam.paperId) : null;
       const lastMin = Number({ ...DEFAULT_RULES, ...(paper?.rules || {}) }.submitLastMin) || 0;
       const left = deadlineOf(a, paper, exam) - Date.now();
+      // the browser's "time up" is only believed when the server's clock agrees
+      if (reason === 'time_up' && left > TIME_UP_SLACK_MS) return res.status(409).json({ error: 'Time is not up yet.', serverNow: now() });
       if (lastMin && reason !== 'time_up' && left > lastMin * 60000 + 15000) return res.status(403).json({ error: `Submit opens in the last ${lastMin} minutes of the exam.` });
     }
     const graded = await gradeOf(a, 'submitted', reason);

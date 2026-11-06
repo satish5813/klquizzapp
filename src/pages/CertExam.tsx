@@ -267,9 +267,11 @@ function Paper({ view, needsGesture, onGesture, onDone }: { view: CertView; need
   const [saveState, setSaveState] = useState<'saved' | 'saving' | 'offline'>('saved');
   const [caseOpen, setCaseOpen] = useState(true);
 
-  const offset = useRef(new Date(view.serverNow).getTime() - Date.now());
+  // server time, counted on the monotonic clock so a change to the device's clock can't move the timer
+  const offset = useRef(new Date(view.serverNow).getTime() - performance.now());
   const endsAt = new Date(view.endsAt).getTime();
-  const nowMs = () => Date.now() + offset.current;
+  const nowMs = () => performance.now() + offset.current;
+  const timeUpRetryAt = useRef(0);
   const ended = useRef(false);
   const answersRef = useRef(answers); answersRef.current = answers;
   const markedRef = useRef(marked); markedRef.current = marked;
@@ -287,8 +289,11 @@ function Paper({ view, needsGesture, onGesture, onDone }: { view: CertView; need
   async function save() {
     if (ended.current || !dirty.current) return;
     dirty.current = false; setSaveState('saving');
-    try { await api.post('/api/cert/save', { attemptId: view.attemptId, answers: answersRef.current, marked: markedRef.current }); setSaveState('saved'); }
-    catch (e: any) {
+    try {
+      const r = await api.post<{ serverNow?: string }>('/api/cert/save', { attemptId: view.attemptId, answers: answersRef.current, marked: markedRef.current });
+      if (r.serverNow) offset.current = new Date(r.serverNow).getTime() - performance.now(); // catches up after the device sleeps
+      setSaveState('saved');
+    } catch (e: any) {
       if (/closed/i.test(e.message)) { ended.current = true; onDone(); return; }
       dirty.current = true; setSaveState('offline');
     }
@@ -336,6 +341,7 @@ function Paper({ view, needsGesture, onGesture, onDone }: { view: CertView; need
       } catch (e: any) {
         if (/already submitted|closed/i.test(e.message)) { onDone(); return; }
         if (/opens in the last/i.test(e.message)) { ended.current = false; setBusy(false); alert(e.message); return; }
+        if (/not up yet/i.test(e.message)) { timeUpRetryAt.current = performance.now() + 30000; dirty.current = true; ended.current = false; setBusy(false); saveRef.current(); return; }
         await new Promise((res) => setTimeout(res, 1500 * i));
       }
     }
@@ -349,7 +355,7 @@ function Paper({ view, needsGesture, onGesture, onDone }: { view: CertView; need
     const tick = () => {
       const left = Math.max(0, Math.round((endsAt - nowMs()) / 1000));
       setRemaining(left);
-      if (left <= 0 && !ended.current) finishRef.current('time_up');
+      if (left <= 0 && !ended.current && performance.now() >= timeUpRetryAt.current) finishRef.current('time_up');
     };
     tick();
     const t = setInterval(tick, 1000);
