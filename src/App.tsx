@@ -9,6 +9,10 @@ import Review from './pages/Review';
 import ReviewAdmin from './pages/ReviewAdmin';
 import FacultyRooms from './pages/FacultyRooms';
 import CertExam from './pages/CertExam';
+import { lazy, Suspense } from 'react';
+
+// the coordinator console is only for course coordinators, so it loads on demand
+const Coordinator = lazy(() => import('./cc/Coordinator'));
 
 // Two logos: drop your images at public/logo-left.png and public/logo-right.png.
 // If a file is missing it falls back to a styled badge so the layout never breaks.
@@ -31,8 +35,10 @@ function Logo({ src, fallback }: { src: string; fallback: string }) {
 
 export default function App() {
   // the faculty attendance / review tables and the certification paper need the full screen width
-  const wide = ['/attendance', '/hackathon-review', '/cert'].includes(useLocation().pathname);
-  const shell = wide ? 'max-w-none' : 'max-w-5xl';
+  const path = useLocation().pathname;
+  const coord = path.startsWith('/coordinator');
+  const wide = coord || ['/attendance', '/hackathon-review', '/cert'].includes(path);
+  const shell = coord ? 'max-w-7xl' : wide ? 'max-w-none' : 'max-w-5xl';
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/85 backdrop-blur print:hidden">
@@ -58,6 +64,7 @@ export default function App() {
           <Route path="/attendance" element={<FacultyRooms key="attendance" kind="attendance" />} />
           <Route path="/hackathon-review" element={<FacultyRooms key="review" kind="review" />} />
           <Route path="/cert" element={<CertExam />} />
+          <Route path="/coordinator/*" element={<Suspense fallback={<div className="text-sm text-slate-500">Loading…</div>}><Coordinator /></Suspense>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

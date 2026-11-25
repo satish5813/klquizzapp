@@ -1377,7 +1377,7 @@ app.get('/api/result/:attemptId', async (req, res) => {
 });
 
 // Programs: titled events with room-wise attendance + hackathon review (see programs.js).
-registerProgramRoutes(app, { db, requireAdmin, getRubric });
+registerProgramRoutes(app, { db, requireAdmin, getRubric, normalizeRubric });
 registerCertExamRoutes(app, { db, requireAdmin });
 
 // Serve the built student client (same origin as the API) if it's present.

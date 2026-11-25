@@ -140,6 +140,20 @@ export async function makeMysqlDb() {
       'ALTER TABLE program_sessions ADD COLUMN auto_sched TINYINT NOT NULL DEFAULT 0',
       "ALTER TABLE program_sessions ADD COLUMN auto_state VARCHAR(16) NOT NULL DEFAULT ''",
     ]) { try { await q(alter); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; } }
+    // a program set up by a course coordinator: owner + its course details, schedule plan and rubric
+    for (const alter of [
+      "ALTER TABLE programs ADD COLUMN owner_cc VARCHAR(64) NOT NULL DEFAULT ''",
+      'ALTER TABLE programs ADD COLUMN meta JSON',
+    ]) { try { await q(alter); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; } }
+    await q(`CREATE TABLE IF NOT EXISTS cc_accounts (
+      id VARCHAR(64) PRIMARY KEY, name VARCHAR(190), email VARCHAR(190), emp_id VARCHAR(32), department VARCHAR(190),
+      active TINYINT NOT NULL DEFAULT 1, created_at VARCHAR(32), INDEX ix_cc_email (email), INDEX ix_cc_emp (emp_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    // a program's own project list (the coordinator's upload), mapped to batches
+    await q(`CREATE TABLE IF NOT EXISTS program_projects (
+      id VARCHAR(64) PRIMARY KEY, program_id VARCHAR(64) NOT NULL, project_id VARCHAR(64), title VARCHAR(500),
+      domain VARCHAR(190), course_code VARCHAR(32), INDEX ix_pp_prog (program_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
     await q('ALTER TABLE program_attendance MODIFY emp_id VARCHAR(190)');
     await q('ALTER TABLE program_scores MODIFY by_emp VARCHAR(190)');
     // Faculty directory (name → email / Emp ID) and OTP + session records for faculty sign-in.
@@ -215,7 +229,9 @@ export async function makeMysqlDb() {
   const toPosting = (r) => ({ sessionId: r.session_id || '', empId: r.emp_id, section: r.section || '', room: r.room || '', facultyName: r.faculty_name || '', present: r.present ?? 0, absent: r.absent ?? 0, total: r.total ?? 0, marks: r.marks || {}, postedAt: r.posted_at });
   const toBatch = (r) => ({ id: r.id, section: r.section || '', batchNo: r.batch_no || '', empId: r.emp_id || '', facultyName: r.faculty_name || '', room: r.room || '', project: r.project || '', ps: r.ps || '', members: r.members || [] });
   const toScore = (r) => ({ id: r.id, reviewId: r.review_id, batchId: r.batch_id, reg: r.reg, present: !!r.present, scores: r.scores || {}, total: r.total ?? 0, byEmp: r.by_emp || '', postedAt: r.posted_at });
-  const toProgram = (r) => ({ id: r.id, title: r.title, createdAt: r.created_at });
+  const toProgram = (r) => ({ id: r.id, title: r.title, createdAt: r.created_at, ownerCc: r.owner_cc || '', meta: (typeof r.meta === 'string' ? JSON.parse(r.meta || '{}') : r.meta) || {} });
+  const toCc = (r) => ({ id: r.id, name: r.name || '', email: r.email || '', empId: r.emp_id || '', department: r.department || '', active: !!r.active, createdAt: r.created_at });
+  const toPProject = (r) => ({ id: r.id, programId: r.program_id, projectId: r.project_id || '', title: r.title || '', domain: r.domain || '', courseCode: r.course_code || '' });
   const toPStudent = (r) => ({ id: r.id, programId: r.program_id, reg: r.reg, courseCode: r.course_code || '', courseName: r.course_name || '', name: r.name || '', branch: r.branch || '', section: r.section || '', room: r.room || '', empId: r.emp_id || '', facultyName: r.faculty_name || '', facultyList: Array.isArray(r.faculty_list) ? r.faculty_list : [], batchNo: r.batch_no || '', reviewer: r.reviewer || '', project: r.project || '', ps: r.ps || '' });
   const toCCourse = (r) => ({ code: r.code, name: r.name || '', certName: r.cert_name || '', department: r.department || '', coordinator: r.coordinator || '', syllabus: r.syllabus || '', outcomes: Array.isArray(r.outcomes) ? r.outcomes : [], active: !!r.active, createdAt: r.created_at });
   const toCCase = (r) => ({ id: r.id, courseCode: r.course_code, title: r.title || '', scenario: r.scenario || '', exhibits: Array.isArray(r.exhibits) ? r.exhibits : [], topic: r.topic || '', difficulty: r.difficulty || '', createdAt: r.created_at });
@@ -419,9 +435,15 @@ export async function makeMysqlDb() {
     programs: {
       all: async () => (await q('SELECT * FROM programs ORDER BY created_at DESC')).map(toProgram),
       get: async (id) => { const r = await q('SELECT * FROM programs WHERE id=?', [id]); return r[0] ? toProgram(r[0]) : null; },
-      add: async (p) => { await q('INSERT INTO programs (id, title, created_at) VALUES (?,?,?)', [p.id, p.title, p.createdAt]); return p; },
-      update: async (id, patch) => { if (typeof patch.title === 'string') await q('UPDATE programs SET title=? WHERE id=?', [patch.title, id]); const r = await q('SELECT * FROM programs WHERE id=?', [id]); return r[0] ? toProgram(r[0]) : null; },
+      add: async (p) => { await q('INSERT INTO programs (id, title, created_at, owner_cc, meta) VALUES (?,?,?,?,?)', [p.id, p.title, p.createdAt, p.ownerCc || '', J(p.meta || {})]); return p; },
+      update: async (id, patch) => {
+        if (typeof patch.title === 'string') await q('UPDATE programs SET title=? WHERE id=?', [patch.title, id]);
+        if (patch.meta && typeof patch.meta === 'object') await q('UPDATE programs SET meta=? WHERE id=?', [J(patch.meta), id]);
+        if (typeof patch.ownerCc === 'string') await q('UPDATE programs SET owner_cc=? WHERE id=?', [patch.ownerCc, id]);
+        const r = await q('SELECT * FROM programs WHERE id=?', [id]); return r[0] ? toProgram(r[0]) : null;
+      },
       remove: async (id) => {
+        await q('DELETE FROM program_projects WHERE program_id=?', [id]);
         await q('DELETE FROM program_scores WHERE program_id=?', [id]);
         await q('DELETE FROM program_attendance WHERE program_id=?', [id]);
         await q('DELETE FROM program_sessions WHERE program_id=?', [id]);
@@ -468,6 +490,42 @@ export async function makeMysqlDb() {
           await q("UPDATE program_students SET project=?, ps=IF(?='', ps, ?) WHERE program_id=? AND reg=?",
             [String(r.project || '').slice(0, 2000), ps, ps, pid, String(r.reg)]);
         }
+      },
+      /** Edit one student of a program (only the fields given). */
+      updateOne: async (pid, reg, p) => {
+        const map = { name: 'name', branch: 'branch', section: 'section', room: 'room', empId: 'emp_id', facultyName: 'faculty_name', batchNo: 'batch_no', reviewer: 'reviewer', project: 'project', ps: 'ps', courseCode: 'course_code', courseName: 'course_name' };
+        const sets = [], vals = [];
+        for (const [k, col] of Object.entries(map)) if (typeof p[k] === 'string') { sets.push(`${col}=?`); vals.push(p[k]); }
+        if (Array.isArray(p.facultyList)) { sets.push('faculty_list=?'); vals.push(J(p.facultyList)); }
+        if (sets.length) await q(`UPDATE program_students SET ${sets.join(', ')} WHERE program_id=? AND reg=?`, [...vals, pid, String(reg)]);
+        const r = await q('SELECT * FROM program_students WHERE program_id=? AND reg=?', [pid, String(reg)]);
+        return r[0] ? toPStudent(r[0]) : null;
+      },
+      removeOne: async (pid, reg) => (await q('DELETE FROM program_students WHERE program_id=? AND reg=?', [pid, String(reg)])).affectedRows || 0,
+    },
+    // course coordinators (sub-admins who run their own programs)
+    ccAccounts: {
+      all: async () => (await q('SELECT * FROM cc_accounts ORDER BY name')).map(toCc),
+      get: async (id) => { const r = await q('SELECT * FROM cc_accounts WHERE id=?', [id]); return r[0] ? toCc(r[0]) : null; },
+      byEmail: async (email) => { const r = await q('SELECT * FROM cc_accounts WHERE LOWER(email)=LOWER(?) LIMIT 1', [email]); return r[0] ? toCc(r[0]) : null; },
+      byEmp: async (empId) => { const r = await q('SELECT * FROM cc_accounts WHERE emp_id=? LIMIT 1', [String(empId)]); return r[0] ? toCc(r[0]) : null; },
+      upsert: async (c) => {
+        await q(`INSERT INTO cc_accounts (id, name, email, emp_id, department, active, created_at) VALUES (?,?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE name=VALUES(name), email=VALUES(email), emp_id=VALUES(emp_id), department=VALUES(department), active=VALUES(active)`,
+          [c.id, c.name || '', c.email || '', c.empId || '', c.department || '', c.active === false ? 0 : 1, c.createdAt || new Date().toISOString()]);
+        return c;
+      },
+      remove: async (id) => { await q('DELETE FROM cc_accounts WHERE id=?', [id]); },
+    },
+    programProjects: {
+      byProgram: async (pid) => (await q('SELECT * FROM program_projects WHERE program_id=? ORDER BY project_id, title', [pid])).map(toPProject),
+      replace: async (pid, rows) => {
+        await q('DELETE FROM program_projects WHERE program_id=?', [pid]);
+        for (let i = 0; i < rows.length; i += 500) {
+          const chunk = rows.slice(i, i + 500);
+          if (chunk.length) await q('INSERT INTO program_projects (id, program_id, project_id, title, domain, course_code) VALUES ?', [chunk.map((r) => [r.id, pid, r.projectId || '', r.title || '', r.domain || '', r.courseCode || ''])]);
+        }
+        return rows.length;
       },
     },
     // ---- certification exams ----

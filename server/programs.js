@@ -31,6 +31,18 @@ function rowFaculty(s) {
 }
 const byNatural = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true });
 
+/** The coordinator's program details (course, academic year, plan…), merged over what is stored. */
+function cleanMeta(m, cur = {}) {
+  const out = { ...cur };
+  if (!m || typeof m !== 'object') return out;
+  for (const [k, n] of [['courseCode', 32], ['courseName', 255], ['academicYear', 16], ['semester', 32], ['department', 190], ['venue', 190], ['startDate', 16], ['endDate', 16], ['status', 16], ['notes', 2000]]) if (typeof m[k] === 'string') out[k] = txt(m[k], n);
+  if (out.courseCode) out.courseCode = out.courseCode.toUpperCase();
+  for (const [k, lo, hi] of [['reviews', 0, 10], ['attendanceCount', 0, 20], ['batchSize', 2, 10], ['step', 0, 20]]) if (m[k] !== undefined && Number.isFinite(Number(m[k]))) out[k] = Math.max(lo, Math.min(hi, Math.round(Number(m[k]))));
+  if (typeof m.autoBatch === 'boolean') out.autoBatch = m.autoBatch;
+  if (m.rubric && typeof m.rubric === 'object') out.rubric = m.rubric;
+  return out;
+}
+
 // ---- OTP helpers ----
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const PEPPER = () => process.env.OTP_PEPPER || process.env.ADMIN_TOKEN || 'kl-otp';
@@ -40,7 +52,42 @@ const DEFAULT_MODE = () => (process.env.FACULTY_OTP === 'off' ? 'empid' : 'otp')
 const maskEmail = (e) => String(e).replace(/^(.{2}).*(@.*)$/, '$1•••$2');
 const OTP_TTL = 10 * 60_000, SESSION_TTL = 12 * 3600_000;
 
-export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
+export function registerProgramRoutes(app, { db, requireAdmin, getRubric, normalizeRubric = (r) => r }) {
+  // ---------- who may manage a program ----------
+  // The admin (x-admin-token) manages every program. A course coordinator (x-cc-token, signed in
+  // by email OTP) manages only the programs they created. Route params :id (program) and :sid
+  // (session) are checked against the coordinator's ownership.
+  async function ccOf(req) {
+    const tok = String(req.headers['x-cc-token'] || '');
+    if (!tok) return null;
+    const s = await db.facultyAuth.byHash(sha(tok), 'ccsess');
+    if (!s || s.expiresAt < new Date().toISOString()) return null;
+    const cc = await db.ccAccounts.get(String(s.fkey).replace(/^cc:/, ''));
+    return cc && cc.active ? cc : null;
+  }
+  const progGuard = async (req, res, next) => {
+    try {
+      if (req.headers['x-admin-token']) return requireAdmin(req, res, next);
+      const cc = await ccOf(req);
+      if (!cc) return res.status(401).json({ error: 'Please sign in again.', reauth: true });
+      req.cc = cc;
+      let pid = '';
+      if (req.params.sid) { const s = await db.programSessions.get(req.params.sid); if (!s) return res.status(404).json({ error: 'Session not found' }); pid = s.programId; }
+      else if (req.params.id) pid = req.params.id;
+      if (pid) {
+        const p = await db.programs.get(pid);
+        if (!p) return res.status(404).json({ error: 'Program not found' });
+        if ((p.ownerCc || '') !== cc.id) return res.status(403).json({ error: 'This hackathon belongs to another coordinator.' });
+      }
+      next();
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  };
+  /** A program's own rubric if its coordinator set one, otherwise the global review rubric. */
+  async function rubricFor(pid) {
+    const p = pid ? await db.programs.get(pid) : null;
+    const r = p?.meta?.rubric;
+    return r && Array.isArray(r.tables) && r.tables.some((t) => (t.criteria || []).length) ? normalizeRubric(r) : getRubric();
+  }
   // ---------- how faculty sign in ----------
   // 'otp'   → email OTP (needs SMTP + an email for every faculty)
   // 'empid' → Employee ID only (no email needed; anyone who knows the ID can post)
@@ -230,9 +277,12 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
   }
 
   // =============== ADMIN ===============
-  app.get('/api/admin/programs', requireAdmin, async (_req, res) => {
+  app.get('/api/admin/programs', progGuard, async (req, res) => {
     const out = [];
+    const ccNames = new Map((await db.ccAccounts.all()).map((c) => [c.id, c.name]));
     for (const p of await db.programs.all()) {
+      if (req.cc && (p.ownerCc || '') !== req.cc.id) continue;
+      p.ownerName = ccNames.get(p.ownerCc) || '';
       const [students, sessions] = await Promise.all([db.programStudents.byProgram(p.id), db.programSessions.byProgram(p.id)]);
       const open = (k) => sessions.filter((s) => s.kind === k).reduce((n, s) => n + (s.openRooms || []).length, 0);
       out.push({ ...p, students: students.length, rooms: roomsOf(students).length, attendanceSessions: sessions.filter((s) => s.kind === 'attendance').length, reviewSessions: sessions.filter((s) => s.kind === 'review').length, openRooms: open('attendance') + open('review'), openAttendance: open('attendance'), openReview: open('review'), batchSize: await batchSizeOf(p.id) });
@@ -240,21 +290,31 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     res.json({ programs: out, auth: await authInfo() });
   });
 
-  app.post('/api/admin/programs', requireAdmin, async (req, res) => {
+  app.post('/api/admin/programs', progGuard, async (req, res) => {
     const title = txt(req.body?.title, 255);
     if (!title) return res.status(400).json({ error: 'Enter a program title.' });
-    const p = { id: crypto.randomUUID(), title, createdAt: new Date().toISOString() };
+    const p = { id: crypto.randomUUID(), title, createdAt: new Date().toISOString(), ownerCc: req.cc?.id || '', meta: cleanMeta(req.body?.meta, {}) };
     await db.programs.add(p); res.json(p);
   });
-  app.post('/api/admin/programs/:id', requireAdmin, async (req, res) => {
-    const title = txt(req.body?.title, 255);
+  app.post('/api/admin/programs/:id', progGuard, async (req, res) => {
+    const cur = await db.programs.get(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'Program not found' });
+    const title = req.body?.title === undefined ? cur.title : txt(req.body.title, 255);
     if (!title) return res.status(400).json({ error: 'Enter a program title.' });
-    const p = await db.programs.update(req.params.id, { title });
+    const patch = { title };
+    if (req.body?.meta && typeof req.body.meta === 'object') patch.meta = cleanMeta(req.body.meta, cur.meta || {});
+    res.json(await db.programs.update(req.params.id, patch));
+  });
+  /** One program with its course details, schedule plan and rubric (the coordinator's dashboard). */
+  app.get('/api/admin/programs/:id', progGuard, async (req, res) => {
+    const p = await db.programs.get(req.params.id);
     if (!p) return res.status(404).json({ error: 'Program not found' });
-    res.json(p);
+    const [students, sessions, projects] = await Promise.all([db.programStudents.byProgram(p.id), db.programSessions.byProgram(p.id), db.programProjects.byProgram(p.id)]);
+    const rooms = roomsOf(students, await dirMap());
+    res.json({ program: { ownerCc: '', meta: {}, ...p }, rubric: await rubricFor(p.id), batchSize: await batchSizeOf(p.id), students: students.length, rooms, sessions, projects: projects.length, auth: await authInfo() });
   });
   // Data protection: a program that already holds attendance or review marks can't be deleted.
-  app.post('/api/admin/programs/:id/delete', requireAdmin, async (req, res) => {
+  app.post('/api/admin/programs/:id/delete', progGuard, async (req, res) => {
     const p = await db.programs.get(req.params.id);
     if (!p) return res.status(404).json({ error: 'Program not found' });
     const [att, sc] = await Promise.all([db.programAttendance.byProgram(p.id), db.programScores.byProgram(p.id)]);
@@ -263,17 +323,23 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
   });
 
   /** Upload roster rows → upsert → build room batches + reviewers → remember faculty emails. */
-  app.post('/api/admin/programs/:id/students/import', requireAdmin, async (req, res) => {
+  app.post('/api/admin/programs/:id/students/import', progGuard, async (req, res) => {
     const p = await db.programs.get(req.params.id);
     if (!p) return res.status(404).json({ error: 'Program not found' });
     const raw = Array.isArray(req.body?.students) ? req.body.students : null;
     if (!raw) return res.status(400).json({ error: 'Body must be { students: [...] }' });
-    const seen = new Set(); const rows = []; let skipped = 0;
+    const seen = new Set(); const rows = []; let skipped = 0; const warnings = []; const cache = new Map();
     for (const s of raw) {
-      const reg = txt(s.reg ?? s.registrationNumber, 64); const name = txt(s.name);
+      const reg = txt(s.reg ?? s.registrationNumber, 64); const name = txt(cleanName(s.name));
       if (!reg || !name || seen.has(reg)) { skipped++; continue; }
       seen.add(reg);
-      const faculty = (Array.isArray(s.faculty) ? s.faculty : [s.facultyName]).filter(isRealName).map((n) => txt(cleanName(n)));
+      // faculty may come as names, or as { name, empId, email } — those are matched to the
+      // faculty's existing record (by Emp ID, then email) so nobody ends up with two records
+      const faculty = [];
+      for (const f of (Array.isArray(s.faculty) ? s.faculty : [s.facultyName])) {
+        const n = await resolveFaculty(f, req, warnings, cache);
+        if (n && !faculty.some((x) => facultyKey(x) === facultyKey(n))) faculty.push(n);
+      }
       rows.push({ id: crypto.randomUUID(), reg, name, branch: txt(s.branch, 64), section: txt(s.section, 64), room: txt(s.room, 64), empId: txt(s.empId, 32), facultyName: faculty[0] || '', facultyList: faculty, batchNo: txt(s.batchNo, 32), project: txt(s.project, 2000), ps: txt(s.ps, 64), courseCode: txt(s.courseCode, 32).toUpperCase(), courseName: txt(s.courseName, 255) });
       // a roster that carries a faculty email / Emp ID fills the directory (for OTP sign-in)
       if (faculty[0] && (txt(s.facultyEmail) || txt(s.empId))) await db.facultyDir.upsert({ key: facultyKey(faculty[0]), name: faculty[0], email: txt(s.facultyEmail).toLowerCase(), empId: txt(s.empId, 32) });
@@ -287,12 +353,48 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     if (req.body?.autoBatch) await rebuildBatches(p.id, size);
     const all = await db.programStudents.byProgram(p.id);
     const rooms = roomsOf(all);
-    res.json({ ...r, skipped, batchSize: size, batches: new Set(all.filter((s) => s.batchNo).map((s) => `${roomKey(s.room)}|${s.batchNo}`)).size, rooms: rooms.length, roomsWithoutFaculty: rooms.filter((x) => !x.faculty.length).map((x) => x.label) });
+    res.json({ ...r, skipped, batchSize: size, batches: new Set(all.filter((s) => s.batchNo).map((s) => `${roomKey(s.room)}|${s.batchNo}`)).size, rooms: rooms.length, roomsWithoutFaculty: rooms.filter((x) => !x.faculty.length).map((x) => x.label), warnings: [...new Set(warnings)].slice(0, 50) });
   });
+
+  /** A faculty entry (name or { name, empId, email }) → the name of their ONE directory record.
+   *  Matches an existing record by Emp ID, then email, then name; creates one only if none fits.
+   *  A coordinator may fill a missing email but not replace one that is already registered. */
+  async function resolveFaculty(f, req, warnings, cache = new Map()) {
+    const o = typeof f === 'string' ? { name: f } : (f && typeof f === 'object' ? f : {});
+    const name = cleanName(o.name), empId = txt(o.empId, 32), email = txt(o.email).toLowerCase();
+    const ck = `${facultyKey(name)}|${empId}|${email}`;
+    if (cache.has(ck)) return cache.get(ck);
+    let out = '';
+    let d = empId ? await db.facultyDir.byEmp(empId) : null;
+    if (!d && email) d = await db.facultyDir.byEmail(email);
+    if (d) {
+      out = d.name || name;
+      const patch = { key: d.key, name: '', email: '', empId: '' };
+      if (email && email !== String(d.email || '').toLowerCase()) {
+        if (!req.cc || !d.email) patch.email = email;
+        else warnings.push(`${out}: kept the email already registered (${maskEmail(d.email)}). Ask the admin to change it.`);
+      }
+      if (empId && !d.empId) patch.empId = empId;
+      if (patch.email || patch.empId) await db.facultyDir.upsert(patch);
+      if (name && facultyKey(name) !== d.key) warnings.push(`"${name}" is registered as "${out}" (Emp ${d.empId || empId || '—'}); the registered name is used.`);
+    } else if (isRealName(name)) {
+      out = name;
+      const ex = await db.facultyDir.get(facultyKey(name));
+      if (!ex) { if (email || empId) await db.facultyDir.upsert({ key: facultyKey(name), name, email, empId }); }
+      else {
+        if (ex.empId && empId && ex.empId !== empId) warnings.push(`${name}: another faculty with this name has Emp ${ex.empId}. Check the Emp ID ${empId}.`);
+        const patch = { key: ex.key, name: '', email: !ex.email ? email : '', empId: !ex.empId ? empId : '' };
+        if (patch.email || patch.empId) await db.facultyDir.upsert(patch);
+      }
+    }
+    out = txt(cleanName(out));
+    cache.set(ck, out);
+    return out;
+  }
 
   /** Batches: { clear: true } empties them (faculty then form batches live during the review),
    *  otherwise they are rebuilt in groups of `batchSize` (reset=true re-does the auto ones). */
-  app.post('/api/admin/programs/:id/batches', requireAdmin, async (req, res) => {
+  app.post('/api/admin/programs/:id/batches', progGuard, async (req, res) => {
     const p = await db.programs.get(req.params.id);
     if (!p) return res.status(404).json({ error: 'Program not found' });
     const size = Math.max(2, Math.min(10, Number(req.body?.batchSize) || await batchSizeOf(p.id)));
@@ -306,10 +408,10 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     res.json({ batchSize: size, ...(await rebuildBatches(p.id, size)) });
   });
 
-  app.get('/api/admin/programs/:id/students', requireAdmin, async (req, res) => res.json({ students: await db.programStudents.byProgram(req.params.id) }));
+  app.get('/api/admin/programs/:id/students', progGuard, async (req, res) => res.json({ students: await db.programStudents.byProgram(req.params.id) }));
 
   /** Faculty of a program with their rooms, review load and registered email. */
-  app.get('/api/admin/programs/:id/faculty', requireAdmin, async (req, res) => {
+  app.get('/api/admin/programs/:id/faculty', progGuard, async (req, res) => {
     const students = await db.programStudents.byProgram(req.params.id);
     const dir = await dirMap();
     const m = new Map();
@@ -395,12 +497,12 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     catch (e) { res.status(502).json({ error: e.message }); }
   });
 
-  app.get('/api/admin/programs/:id/sessions', requireAdmin, async (req, res) => {
+  app.get('/api/admin/programs/:id/sessions', progGuard, async (req, res) => {
     const kind = String(req.query.kind || '');
     const all = await db.programSessions.byProgram(req.params.id);
     res.json({ sessions: KINDS.includes(kind) ? all.filter((s) => s.kind === kind) : all });
   });
-  app.post('/api/admin/programs/:id/sessions', requireAdmin, async (req, res) => {
+  app.post('/api/admin/programs/:id/sessions', progGuard, async (req, res) => {
     const p = await db.programs.get(req.params.id);
     if (!p) return res.status(404).json({ error: 'Program not found' });
     const kind = String(req.body?.kind || '');
@@ -410,7 +512,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     rememberPublicUrl(req);
     await db.programSessions.add(s); res.json(s);
   });
-  app.post('/api/admin/program-sessions/:sid', requireAdmin, async (req, res) => {
+  app.post('/api/admin/program-sessions/:sid', progGuard, async (req, res) => {
     const cur = await db.programSessions.get(req.params.sid);
     if (!cur) return res.status(404).json({ error: 'Session not found' });
     const patch = {};
@@ -428,16 +530,16 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
   });
 
   /** Schedule overview for the admin: every session's window and what the scheduler will do next. */
-  app.get('/api/admin/program-schedule', requireAdmin, async (_req, res) => {
+  app.get('/api/admin/program-schedule', progGuard, async (req, res) => {
     const now = Date.now(), out = [];
-    for (const p of await db.programs.all()) for (const s of await db.programSessions.byProgram(p.id)) {
+    for (const p of await db.programs.all()) if (!req.cc || (p.ownerCc || '') === req.cc.id) for (const s of await db.programSessions.byProgram(p.id)) {
       const w = windowOf(s);
       out.push({ programId: p.id, programTitle: p.title, id: s.id, kind: s.kind, name: s.name, date: s.date, startTime: s.startTime, endTime: s.endTime, auto: s.auto, autoState: s.autoState, openRooms: (s.openRooms || []).length, start: w ? new Date(w.start).toISOString() : null, end: w ? new Date(w.end).toISOString() : null, phase: !w ? 'no-time' : now < w.start ? 'upcoming' : now < w.end ? 'live' : 'over' });
     }
     out.sort((a, b) => String(a.start || '').localeCompare(String(b.start || '')));
     res.json({ now: new Date(now).toISOString(), remindMinutes: REMIND_MS / 60_000, email: smtpConfigured(), sessions: out });
   });
-  app.post('/api/admin/program-sessions/:sid/delete', requireAdmin, async (req, res) => {
+  app.post('/api/admin/program-sessions/:sid/delete', progGuard, async (req, res) => {
     const ctx = await loadSession(req, res); if (!ctx) return;
     const has = ctx.session.kind === 'attendance' ? (await db.programAttendance.bySession(ctx.session.id)).length : (await db.programScores.bySession(ctx.session.id)).length;
     if (has) return res.status(403).json({ error: 'This session already has submitted data and is kept permanently.' });
@@ -445,17 +547,17 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
   });
 
   /** Room board for one session — the room cards. */
-  app.get('/api/admin/program-sessions/:sid/board', requireAdmin, async (req, res) => {
+  app.get('/api/admin/program-sessions/:sid/board', progGuard, async (req, res) => {
     const ctx = await loadSession(req, res); if (!ctx) return;
     const students = await db.programStudents.byProgram(ctx.program.id);
     const rooms = await roomStatus(ctx.session, students, await dirMap());
     const summary = { rooms: rooms.length, open: rooms.filter((r) => r.open).length, posted: rooms.filter((r) => r.posted).length, students: students.length, present: rooms.reduce((n, r) => n + (r.present || 0), 0), absent: rooms.reduce((n, r) => n + (r.absent || 0), 0), scored: rooms.reduce((n, r) => n + (r.scored || 0), 0), noFaculty: rooms.filter((r) => !r.faculty.length).length };
-    const maxTotal = ctx.session.kind === 'review' ? Object.values(critMaxOf(await getRubric())).reduce((n, v) => n + v, 0) : 0;
+    const maxTotal = ctx.session.kind === 'review' ? Object.values(critMaxOf(await rubricFor(ctx.program.id))).reduce((n, v) => n + v, 0) : 0;
     res.json({ program: ctx.program, session: ctx.session, rooms, summary, maxTotal });
   });
 
   /** Open or close rooms: { open: true|false, rooms: ['C121', ...] | 'ALL' }. */
-  app.post('/api/admin/program-sessions/:sid/rooms', requireAdmin, async (req, res) => {
+  app.post('/api/admin/program-sessions/:sid/rooms', progGuard, async (req, res) => {
     const ctx = await loadSession(req, res); if (!ctx) return;
     const all = roomsOf(await db.programStudents.byProgram(ctx.program.id)).map((r) => r.room);
     const target = req.body?.rooms === 'ALL' ? all : (Array.isArray(req.body?.rooms) ? req.body.rooms.map(roomKey).filter((r) => all.includes(r)) : []);
@@ -467,7 +569,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
   });
 
   /** One room's detail: students + attendance mark or review scores (with batch + reviewer). */
-  app.get('/api/admin/program-sessions/:sid/rooms/:room', requireAdmin, async (req, res) => {
+  app.get('/api/admin/program-sessions/:sid/rooms/:room', progGuard, async (req, res) => {
     const ctx = await loadSession(req, res); if (!ctx) return;
     const room = roomKey(req.params.room);
     const students = (await db.programStudents.byProgram(ctx.program.id)).filter((s) => roomKey(s.room) === room).sort(byBatch);
@@ -479,7 +581,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
       const p = await db.programAttendance.get(ctx.session.id, room);
       return res.json({ program: ctx.program, session: ctx.session, room, open, faculty: info.faculty, posting: p, students: students.map((s) => ({ ...lite(s), present: p ? !!p.marks[s.reg] : null })) });
     }
-    const rubric = await getRubric(); const critMax = critMaxOf(rubric);
+    const rubric = await rubricFor(ctx.program.id); const critMax = critMaxOf(rubric);
     const scores = new Map((await db.programScores.bySession(ctx.session.id)).filter((s) => s.room === room).map((s) => [s.reg, s]));
     res.json({
       program: ctx.program, session: ctx.session, room, open, faculty: info.faculty, reviewers: info.reviewers, rubric, maxTotal: Object.values(critMax).reduce((n, v) => n + v, 0),
@@ -493,7 +595,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
   });
 
   /** Clear a room's submission so its faculty can post again. */
-  app.post('/api/admin/program-sessions/:sid/rooms/:room/revoke', requireAdmin, async (req, res) => {
+  app.post('/api/admin/program-sessions/:sid/rooms/:room/revoke', progGuard, async (req, res) => {
     const ctx = await loadSession(req, res); if (!ctx) return;
     const room = roomKey(req.params.room);
     const removed = ctx.session.kind === 'attendance' ? await db.programAttendance.remove(ctx.session.id, room) : await db.programScores.removeRoom(ctx.session.id, room);
@@ -503,14 +605,14 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
   /** Everything about one program in a single payload: attendance per session, review marks per
    *  round, and per student / room / certification course summaries — the reports the admin
    *  downloads once the hackathon is over. */
-  app.get('/api/admin/programs/:id/report', requireAdmin, async (req, res) => {
+  app.get('/api/admin/programs/:id/report', progGuard, async (req, res) => {
     const program = await db.programs.get(req.params.id);
     if (!program) return res.status(404).json({ error: 'Program not found' });
     const students = (await db.programStudents.byProgram(program.id)).sort((a, b) => byNatural(roomKey(a.room), roomKey(b.room)) || byBatch(a, b));
     const sessions = (await db.programSessions.byProgram(program.id)).sort((a, b) => String(a.date || a.createdAt).localeCompare(String(b.date || b.createdAt)));
     const att = sessions.filter((s) => s.kind === 'attendance');
     const rev = sessions.filter((s) => s.kind === 'review');
-    const rubric = await getRubric(); const critMax = critMaxOf(rubric);
+    const rubric = await rubricFor(program.id); const critMax = critMaxOf(rubric);
     const crit = []; rubric.tables.forEach((t, ti) => t.criteria.forEach((c, ci) => crit.push({ key: `t${ti}_c${ci}`, label: c.label, max: c.max })));
     const maxTotal = crit.reduce((n, c) => n + c.max, 0);
 
@@ -612,7 +714,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
   });
 
   /** Flat rows for an Excel export of one session. */
-  app.get('/api/admin/program-sessions/:sid/export', requireAdmin, async (req, res) => {
+  app.get('/api/admin/program-sessions/:sid/export', progGuard, async (req, res) => {
     const ctx = await loadSession(req, res); if (!ctx) return;
     const students = (await db.programStudents.byProgram(ctx.program.id)).sort((a, b) => byNatural(roomKey(a.room), roomKey(b.room)) || byBatch(a, b));
     const facNames = new Map(); for (const s of students) for (const f of rowFaculty(s)) facNames.set(f.key, f.name);
@@ -622,7 +724,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
       const rows = students.map((s) => { const p = posts.get(roomKey(s.room)); return { 'Reg No': s.reg, Name: s.name, Branch: s.branch, Section: s.section, Room: s.room, Faculty: roomFac.get(roomKey(s.room)) || '', Status: p ? (p.marks[s.reg] ? 'Present' : 'Absent') : 'Not posted', 'Posted by': p?.facultyName || '', 'Posted at': p ? new Date(p.postedAt).toLocaleString('en-IN') : '' }; });
       return res.json({ program: ctx.program, session: ctx.session, rows });
     }
-    const rubric = await getRubric(); const critMax = critMaxOf(rubric);
+    const rubric = await rubricFor(ctx.program.id); const critMax = critMaxOf(rubric);
     const flat = []; rubric.tables.forEach((t, ti) => t.criteria.forEach((c, ci) => flat.push({ key: `t${ti}_c${ci}`, label: c.label, max: c.max })));
     const scores = new Map((await db.programScores.bySession(ctx.session.id)).map((s) => [s.reg, s]));
     const rows = students.map((s) => {
@@ -635,6 +737,353 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
       return row;
     });
     res.json({ program: ctx.program, session: ctx.session, rows });
+  });
+
+  // =============== COURSE COORDINATORS (sub-admins) ===============
+  const ccPublic = (c) => ({ id: c.id, name: c.name, email: c.email, empId: c.empId, department: c.department, active: c.active, createdAt: c.createdAt });
+  const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  app.get('/api/admin/coordinators', requireAdmin, async (_req, res) => {
+    const owned = new Map();
+    for (const p of await db.programs.all()) if (p.ownerCc) owned.set(p.ownerCc, [...(owned.get(p.ownerCc) || []), p.title]);
+    res.json({ coordinators: (await db.ccAccounts.all()).map((c) => ({ ...ccPublic(c), programs: owned.get(c.id) || [] })), auth: await authInfo() });
+  });
+  app.post('/api/admin/coordinators', requireAdmin, async (req, res) => {
+    const id = txt(req.body?.id, 64);
+    const cur = id ? await db.ccAccounts.get(id) : null;
+    if (id && !cur) return res.status(404).json({ error: 'Coordinator not found' });
+    const name = cleanName(req.body?.name), email = txt(req.body?.email).toLowerCase(), empId = txt(req.body?.empId, 32);
+    if (!name) return res.status(400).json({ error: 'Enter the coordinator\'s name.' });
+    if (!EMAIL.test(email)) return res.status(400).json({ error: 'Enter a valid email — the sign-in code is sent there.' });
+    const byMail = await db.ccAccounts.byEmail(email);
+    if (byMail && byMail.id !== id) return res.status(409).json({ error: `${byMail.name} already uses this email.` });
+    if (empId) { const byEmp = await db.ccAccounts.byEmp(empId); if (byEmp && byEmp.id !== id) return res.status(409).json({ error: `${byEmp.name} already uses Emp ID ${empId}.` }); }
+    const c = { id: id || crypto.randomUUID(), name, email, empId, department: txt(req.body?.department, 190), active: req.body?.active === undefined ? (cur ? cur.active : true) : !!req.body.active, createdAt: cur?.createdAt || new Date().toISOString() };
+    await db.ccAccounts.upsert(c);
+    if (!c.active) await db.facultyAuth.removeKind(`cc:${c.id}`, 'ccsess'); // switching off signs them out
+    res.json(ccPublic(c));
+  });
+  app.post('/api/admin/coordinators/:id/delete', requireAdmin, async (req, res) => {
+    const c = await db.ccAccounts.get(req.params.id);
+    if (!c) return res.status(404).json({ error: 'Coordinator not found' });
+    const owns = (await db.programs.all()).filter((p) => p.ownerCc === c.id);
+    if (owns.length) return res.status(409).json({ error: `${c.name} runs ${owns.length} hackathon(s). Switch the login off instead, or move the hackathons to another coordinator first.` });
+    await db.facultyAuth.removeKind(`cc:${c.id}`, 'ccsess');
+    await db.ccAccounts.remove(c.id); res.json({ ok: true });
+  });
+  /** Admin: hand a program to a coordinator (or back to the admin with ccId ''). */
+  app.post('/api/admin/programs/:id/owner', requireAdmin, async (req, res) => {
+    const ccId = txt(req.body?.ccId, 64);
+    if (ccId && !(await db.ccAccounts.get(ccId))) return res.status(404).json({ error: 'Coordinator not found' });
+    const p = await db.programs.update(req.params.id, { ownerCc: ccId });
+    if (!p) return res.status(404).json({ error: 'Program not found' });
+    res.json(p);
+  });
+
+  // ---- coordinator sign-in: Emp ID / email → 6-digit code by email → session token ----
+  async function findCc(id) {
+    const raw = txt(id); if (!raw) return null;
+    return raw.includes('@') ? db.ccAccounts.byEmail(raw) : db.ccAccounts.byEmp(raw);
+  }
+  app.post('/api/cc/otp/request', async (req, res) => {
+    const c = await findCc(req.body?.id);
+    if (!c) return res.status(404).json({ error: 'No coordinator login with this Emp ID / email. Please contact the admin.' });
+    if (!c.active) return res.status(403).json({ error: 'This coordinator login is switched off. Please contact the admin.' });
+    if (!smtpConfigured() && !OTP_DEBUG()) return res.status(503).json({ error: 'Email is not set up on the server yet. Please contact the admin.' });
+    const fkey = `cc:${c.id}`, now = Date.now();
+    const last = await db.facultyAuth.latest(fkey, 'ccotp');
+    if (last && now - Date.parse(last.createdAt) < 60_000) return res.status(429).json({ error: 'A code was just sent. Please check your email or wait a minute.' });
+    if (await db.facultyAuth.countSince(fkey, 'ccotp', new Date(now - 3600_000).toISOString()) >= 6) return res.status(429).json({ error: 'Too many code requests. Please try again later.' });
+    const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+    const rec = { id: crypto.randomUUID(), fkey, kind: 'ccotp', secretHash: otpHash(fkey, code), expiresAt: new Date(now + OTP_TTL).toISOString(), attempts: 0, createdAt: new Date(now).toISOString() };
+    await db.facultyAuth.add(rec);
+    if (!OTP_DEBUG()) {
+      try {
+        await sendMail({
+          to: c.email, subject: `${code} is your KL Coordinator sign-in code`,
+          text: `Dear ${c.name},\n\nYour sign-in code for the KL Hackathon Coordinator console is ${code}.\nIt is valid for 10 minutes. Do not share it with anyone.\n\n— KL Skill Development`,
+          html: `<div style="font-family:Segoe UI,Arial,sans-serif;font-size:15px;color:#0f172a">Dear ${String(c.name).replace(/</g, '&lt;')},<br><br>Your sign-in code for the <b>KL Hackathon Coordinator console</b> is<div style="font-size:30px;font-weight:800;letter-spacing:6px;margin:14px 0;color:#4338ca">${code}</div>It is valid for <b>10 minutes</b>. Do not share it with anyone.<br><br>— KL Skill Development</div>`,
+        });
+      } catch (e) { await db.facultyAuth.remove(rec.id); return res.status(502).json({ error: `Could not send the code: ${e.message}` }); }
+    }
+    res.json({ ok: true, to: maskEmail(c.email), ...(OTP_DEBUG() ? { debugCode: code } : {}) });
+  });
+  app.post('/api/cc/otp/verify', async (req, res) => {
+    const c = await findCc(req.body?.id);
+    if (!c || !c.active) return res.status(404).json({ error: 'No active coordinator login with this Emp ID / email.' });
+    const fkey = `cc:${c.id}`;
+    const code = txt(req.body?.code, 12).replace(/\D/g, '');
+    const last = await db.facultyAuth.latest(fkey, 'ccotp');
+    if (!last || last.expiresAt < new Date().toISOString()) return res.status(400).json({ error: 'This code has expired. Please request a new one.' });
+    if (last.attempts >= 5) return res.status(429).json({ error: 'Too many wrong attempts. Please request a new code.' });
+    const a = Buffer.from(otpHash(fkey, code)), b = Buffer.from(last.secretHash);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) { await db.facultyAuth.bumpAttempts(last.id); return res.status(400).json({ error: `Incorrect code. ${Math.max(0, 4 - last.attempts)} attempt(s) left.` }); }
+    await db.facultyAuth.removeKind(fkey, 'ccotp');
+    const token = crypto.randomBytes(32).toString('hex');
+    await db.facultyAuth.add({ id: crypto.randomUUID(), fkey, kind: 'ccsess', secretHash: sha(token), expiresAt: new Date(Date.now() + SESSION_TTL).toISOString(), attempts: 0, createdAt: new Date().toISOString() });
+    db.facultyAuth.purgeExpired(new Date().toISOString()).catch(() => {});
+    rememberPublicUrl(req);
+    res.json({ token, coordinator: ccPublic(c) });
+  });
+  app.get('/api/cc/me', async (req, res) => {
+    const c = await ccOf(req);
+    if (!c) return res.status(401).json({ error: 'Please sign in again.', reauth: true });
+    res.json({ coordinator: ccPublic(c), auth: await authInfo(), facultyUrl: await publicUrl() });
+  });
+  app.post('/api/cc/logout', async (req, res) => {
+    const tok = String(req.headers['x-cc-token'] || '');
+    if (tok) { const s = await db.facultyAuth.byHash(sha(tok), 'ccsess'); if (s) await db.facultyAuth.remove(s.id); }
+    res.json({ ok: true });
+  });
+
+  // =============== PROGRAM EDITING (admin or the owning coordinator) ===============
+  /** Re-share a program's existing batches among each room's faculty (whole batches, evenly). */
+  async function reshareReviewers(pid) {
+    const batched = (await db.programStudents.byProgram(pid)).filter((s) => s.batchNo);
+    const changed = planBatches(batched, await batchSizeOf(pid)).filter((p) => p.changed);
+    if (changed.length) await db.programStudents.setBatches(pid, changed);
+    return changed.length;
+  }
+  const roomFacultyOf = (students, room) => { const r = roomsOf(students.filter((s) => roomKey(s.room) === roomKey(room)))[0]; return r ? r.faculty.map((f) => f.name) : []; };
+  const pick = (o, keys) => Object.fromEntries(keys.filter((k) => typeof o?.[k] === 'string').map((k) => [k, k === 'courseCode' ? txt(o[k], 32).toUpperCase() : txt(o[k], k === 'project' ? 2000 : 190)]));
+
+  /** Add one student (faculty = that room's faculty). */
+  app.post('/api/admin/programs/:id/student-add', progGuard, async (req, res) => {
+    const pid = req.params.id;
+    const reg = txt(req.body?.reg, 64), name = txt(cleanName(req.body?.name));
+    if (!reg || !name) return res.status(400).json({ error: 'Enter the registration number and name.' });
+    const all = await db.programStudents.byProgram(pid);
+    if (all.some((s) => String(s.reg) === reg)) return res.status(409).json({ error: `${reg} is already in this hackathon.` });
+    const room = txt(req.body?.room, 64);
+    const faculty = room ? roomFacultyOf(all, room) : [];
+    const like = all.find((s) => roomKey(s.room) === roomKey(room)) || all[0] || {};
+    const row = { id: crypto.randomUUID(), reg, name, branch: txt(req.body?.branch, 64) || like.branch || '', section: txt(req.body?.section, 64) || like.section || '', room, empId: '', facultyName: faculty[0] || '', facultyList: faculty, batchNo: txt(req.body?.batchNo, 32).toUpperCase(), project: '', ps: '', courseCode: txt(req.body?.courseCode, 32).toUpperCase() || like.courseCode || '', courseName: txt(req.body?.courseName, 255) || like.courseName || '' };
+    await db.programStudents.importMany(pid, [row], false);
+    if (row.batchNo) await reshareReviewers(pid);
+    res.json({ ok: true, student: row });
+  });
+  /** Edit one student. Moving to another room gives them that room's faculty automatically. */
+  app.post('/api/admin/programs/:id/student/:reg', progGuard, async (req, res) => {
+    const pid = req.params.id, reg = txt(req.params.reg, 64);
+    const all = await db.programStudents.byProgram(pid);
+    const cur = all.find((s) => String(s.reg) === reg);
+    if (!cur) return res.status(404).json({ error: 'Student not found in this hackathon.' });
+    const patch = pick(req.body, ['name', 'branch', 'section', 'room', 'batchNo', 'project', 'ps', 'courseCode', 'courseName']);
+    if (patch.batchNo !== undefined) patch.batchNo = patch.batchNo.toUpperCase();
+    if (patch.batchNo === '') patch.reviewer = ''; // out of a batch → nobody reviews them as a team
+    let moved = false;
+    if (patch.room !== undefined && roomKey(patch.room) !== roomKey(cur.room)) {
+      const faculty = roomFacultyOf(all, patch.room);
+      patch.facultyList = faculty; patch.facultyName = faculty[0] || '';
+      // a batch, its reviewer and its project belong to one room
+      if (patch.batchNo === undefined) patch.batchNo = '';
+      patch.reviewer = '';
+      if (patch.project === undefined) { patch.project = ''; patch.ps = ''; }
+      moved = true;
+    }
+    const s = await db.programStudents.updateOne(pid, reg, patch);
+    if (moved || patch.batchNo !== undefined) await reshareReviewers(pid);
+    res.json({ ok: true, student: s, moved });
+  });
+  app.post('/api/admin/programs/:id/student/:reg/delete', progGuard, async (req, res) => {
+    const pid = req.params.id, reg = txt(req.params.reg, 64);
+    const scored = (await db.programScores.byProgram(pid)).some((s) => String(s.reg) === reg);
+    if (scored) return res.status(403).json({ error: 'This student already has review marks, so they are kept. Move them to another room instead.' });
+    const n = await db.programStudents.removeOne(pid, reg);
+    if (!n) return res.status(404).json({ error: 'Student not found in this hackathon.' });
+    await reshareReviewers(pid);
+    res.json({ ok: true });
+  });
+
+  /** Change a room's faculty: { room, faculty: [name | { name, empId, email }], label? } → all its students. */
+  app.post('/api/admin/programs/:id/room-faculty', progGuard, async (req, res) => {
+    const pid = req.params.id, room = txt(req.body?.room, 64);
+    const all = await db.programStudents.byProgram(pid);
+    const inRoom = all.filter((s) => roomKey(s.room) === roomKey(room));
+    if (!inRoom.length) return res.status(404).json({ error: 'No students in this room.' });
+    const warnings = []; const names = [];
+    for (const f of (Array.isArray(req.body?.faculty) ? req.body.faculty : []).slice(0, 8)) {
+      const n = await resolveFaculty(f, req, warnings);
+      if (n && !names.some((x) => facultyKey(x) === facultyKey(n))) names.push(n);
+    }
+    if (!names.length) return res.status(400).json({ error: 'Give the room at least one faculty.' });
+    const label = txt(req.body?.label, 64);
+    for (const s of inRoom) await db.programStudents.updateOne(pid, s.reg, { facultyList: names, facultyName: names[0], ...(label ? { room: label } : {}) });
+    const reassigned = await reshareReviewers(pid);
+    res.json({ ok: true, room: label || room, faculty: names, students: inRoom.length, reassigned, warnings });
+  });
+  /** Hand one batch to another faculty of the same room. */
+  app.post('/api/admin/programs/:id/batch-reviewer', progGuard, async (req, res) => {
+    const pid = req.params.id, room = roomKey(req.body?.room), batchNo = txt(req.body?.batchNo, 32), reviewer = txt(req.body?.reviewer);
+    const all = await db.programStudents.byProgram(pid);
+    const members = all.filter((s) => roomKey(s.room) === room && s.batchNo === batchNo);
+    if (!members.length) return res.status(404).json({ error: 'Batch not found.' });
+    if (!roomsOf(members)[0].faculty.some((f) => f.key === reviewer)) return res.status(400).json({ error: 'The reviewer must be one of this room\'s faculty.' });
+    await db.programStudents.setBatches(pid, members.map((s) => ({ id: s.id, reg: s.reg, batchNo, reviewer })));
+    res.json({ ok: true, batch: batchNo, members: members.length });
+  });
+
+  // ---- the program's own project list, mapped to batches ----
+  app.get('/api/admin/programs/:id/projects', progGuard, async (req, res) => {
+    const projects = await db.programProjects.byProgram(req.params.id);
+    const students = await db.programStudents.byProgram(req.params.id);
+    const used = new Map(); const batches = new Map();
+    for (const s of students) if (s.batchNo) { const k = `${roomKey(s.room)}|${s.batchNo}`; if (!batches.has(k)) batches.set(k, s); }
+    for (const s of batches.values()) if (s.ps || s.project) { const k = s.ps || s.project; used.set(k, (used.get(k) || 0) + 1); }
+    res.json({ projects: projects.map((p) => ({ ...p, batches: used.get(p.projectId) || used.get(p.title) || 0 })), batches: batches.size, withProject: [...batches.values()].filter((s) => s.project).length });
+  });
+  app.post('/api/admin/programs/:id/projects', progGuard, async (req, res) => {
+    const raw = Array.isArray(req.body?.rows) ? req.body.rows : null;
+    if (!raw) return res.status(400).json({ error: 'Body must be { rows: [...] }' });
+    const seen = new Set(); const rows = []; let n = 0;
+    for (const r of raw) {
+      const title = txt(r.title, 500); if (!title) continue;
+      const projectId = txt(r.projectId, 64) || `P${String(rows.length + 1).padStart(3, '0')}`;
+      const k = projectId.toUpperCase(); if (seen.has(k)) continue; seen.add(k);
+      rows.push({ id: crypto.randomUUID(), projectId, title, domain: txt(r.domain, 190), courseCode: txt(r.courseCode, 32).toUpperCase() });
+    }
+    if (!rows.length) return res.status(400).json({ error: 'No valid rows (each project needs a title).' });
+    await db.programProjects.replace(req.params.id, rows);
+    res.json({ total: rows.length, domains: [...new Set(rows.map((r) => r.domain).filter(Boolean))].length });
+  });
+  /** Give every batch a project: least-used first, the batch's course only, varied domains in a room. */
+  app.post('/api/admin/programs/:id/projects/assign', progGuard, async (req, res) => {
+    const pid = req.params.id, overwrite = !!req.body?.overwrite;
+    const projects = await db.programProjects.byProgram(pid);
+    if (!projects.length) return res.status(400).json({ error: 'Upload the project list first.' });
+    const students = await db.programStudents.byProgram(pid);
+    const batches = new Map();
+    for (const s of students) if (s.batchNo) { const k = `${roomKey(s.room)}|${s.batchNo}`; (batches.get(k) || batches.set(k, []).get(k)).push(s); }
+    if (!batches.size) return res.status(400).json({ error: 'There are no batches yet. Make the batches first.' });
+    const use = new Map(projects.map((p) => [p.projectId, 0]));
+    for (const m of batches.values()) if (m[0].ps && use.has(m[0].ps)) use.set(m[0].ps, use.get(m[0].ps) + 1);
+    const roomDomains = new Map(); const rows = []; let assigned = 0;
+    const keys = [...batches.keys()].sort(byNatural);
+    for (const k of keys) {
+      const m = batches.get(k); const room = k.split('|')[0];
+      if (!overwrite && m[0].project) { const d = projects.find((p) => p.projectId === m[0].ps)?.domain; if (d) { const rd = roomDomains.get(room) || new Map(); rd.set(d, (rd.get(d) || 0) + 1); roomDomains.set(room, rd); } continue; }
+      const code = (m[0].courseCode || '').toUpperCase();
+      let pool = projects.filter((p) => !p.courseCode || !code || p.courseCode === code);
+      if (!pool.length) pool = projects;
+      const rd = roomDomains.get(room) || new Map();
+      const takenHere = new Set(keys.filter((x) => x.startsWith(room + '|')).map((x) => batches.get(x)[0].ps).filter(Boolean));
+      pool.sort((a, b) => (takenHere.has(a.projectId) - takenHere.has(b.projectId)) || (use.get(a.projectId) - use.get(b.projectId)) || ((rd.get(a.domain) || 0) - (rd.get(b.domain) || 0)) || byNatural(a.projectId, b.projectId));
+      const p = pool[0];
+      use.set(p.projectId, use.get(p.projectId) + 1);
+      if (p.domain) { rd.set(p.domain, (rd.get(p.domain) || 0) + 1); roomDomains.set(room, rd); }
+      for (const s of m) { rows.push({ reg: s.reg, project: p.title, ps: p.projectId }); s.ps = p.projectId; s.project = p.title; }
+      assigned++;
+    }
+    if (rows.length) await db.programStudents.setProjects(pid, rows);
+    res.json({ ok: true, batches: batches.size, assigned, maxPerProject: Math.max(0, ...use.values()) });
+  });
+  /** Set one batch's project by hand: { room, batchNo, projectId } or { …, title }. */
+  app.post('/api/admin/programs/:id/batch-project', progGuard, async (req, res) => {
+    const pid = req.params.id, room = roomKey(req.body?.room), batchNo = txt(req.body?.batchNo, 32);
+    const members = (await db.programStudents.byProgram(pid)).filter((s) => roomKey(s.room) === room && s.batchNo === batchNo);
+    if (!members.length) return res.status(404).json({ error: 'Batch not found.' });
+    const p = req.body?.projectId ? (await db.programProjects.byProgram(pid)).find((x) => x.projectId === txt(req.body.projectId, 64)) : null;
+    const title = p ? p.title : txt(req.body?.title, 2000);
+    await db.programStudents.setProjects(pid, members.map((s) => ({ reg: s.reg, project: title, ps: p ? p.projectId : '' })));
+    res.json({ ok: true, project: title, members: members.length });
+  });
+
+  // ---- the program's own rubric ----
+  const shapeOf = (r) => JSON.stringify((r?.tables || []).map((t) => (t.criteria || []).length));
+  app.get('/api/admin/programs/:id/rubric', progGuard, async (req, res) => {
+    const p = await db.programs.get(req.params.id);
+    res.json({ rubric: await rubricFor(req.params.id), own: !!p?.meta?.rubric, global: await getRubric() });
+  });
+  app.post('/api/admin/programs/:id/rubric', progGuard, async (req, res) => {
+    const p = await db.programs.get(req.params.id);
+    if (!p) return res.status(404).json({ error: 'Program not found' });
+    const next = req.body?.reset ? null : normalizeRubric(req.body?.rubric || {});
+    if (next && (!next.tables.length || !next.tables.some((t) => t.criteria.length) || next.tables.some((t) => t.criteria.some((c) => !c.label)))) return res.status(400).json({ error: 'Every criterion needs a name and marks.' });
+    const scored = (await db.programScores.byProgram(p.id)).length;
+    if (scored && shapeOf(next || await getRubric()) !== shapeOf(await rubricFor(p.id))) return res.status(409).json({ error: 'Review marks are already entered, so criteria can no longer be added or removed. You can still rename them or change band descriptions.' });
+    const meta = { ...(p.meta || {}) };
+    if (next) meta.rubric = next; else delete meta.rubric;
+    await db.programs.update(p.id, { meta });
+    res.json({ rubric: await rubricFor(p.id), own: !!next });
+  });
+
+  /** Replace the program's session plan in one go: [{ id?, kind, name, date, startTime, endTime, auto }].
+   *  Sessions missing from the list are removed unless they already hold attendance or marks. */
+  app.post('/api/admin/programs/:id/schedule', progGuard, async (req, res) => {
+    const pid = req.params.id;
+    const list = Array.isArray(req.body?.sessions) ? req.body.sessions.slice(0, 40) : null;
+    if (!list) return res.status(400).json({ error: 'Body must be { sessions: [...] }' });
+    const cur = await db.programSessions.byProgram(pid);
+    const keep = new Set(); const kept = [];
+    for (const r of list) {
+      const kind = KINDS.includes(r.kind) ? r.kind : null; if (!kind) continue;
+      const fields = { name: txt(r.name) || (kind === 'review' ? 'Review' : 'Attendance'), date: txt(r.date, 16), startTime: txt(r.startTime, 8), endTime: txt(r.endTime, 8), auto: r.auto !== false };
+      const ex = r.id ? cur.find((s) => s.id === r.id) : null;
+      if (ex) {
+        const patch = { ...fields };
+        const w = windowOf({ ...ex, ...patch }), now = Date.now();
+        if (['date', 'startTime', 'endTime', 'auto'].some((k) => patch[k] !== ex[k])) { if (!w || now < w.start) patch.autoState = ''; else if (now < w.end) patch.autoState = ex.autoState === 'opened' ? 'opened' : ''; }
+        kept.push(await db.programSessions.update(ex.id, patch)); keep.add(ex.id);
+      } else {
+        const s = { id: crypto.randomUUID(), programId: pid, kind, ...fields, openRooms: [], autoState: '', createdAt: new Date(Date.now() + kept.length).toISOString() };
+        await db.programSessions.add(s); kept.push(s); keep.add(s.id);
+      }
+    }
+    const blocked = [];
+    for (const s of cur) {
+      if (keep.has(s.id)) continue;
+      const has = s.kind === 'attendance' ? (await db.programAttendance.bySession(s.id)).length : (await db.programScores.bySession(s.id)).length;
+      if (has) { blocked.push(s.name); continue; }
+      await db.programSessions.remove(s.id);
+    }
+    rememberPublicUrl(req);
+    res.json({ sessions: await db.programSessions.byProgram(pid), kept: blocked });
+  });
+
+  /** Readiness check: what is missing before (or while) the hackathon runs. */
+  app.get('/api/admin/programs/:id/checks', progGuard, async (req, res) => {
+    const p = await db.programs.get(req.params.id);
+    if (!p) return res.status(404).json({ error: 'Program not found' });
+    const [students, sessions, projects] = await Promise.all([db.programStudents.byProgram(p.id), db.programSessions.byProgram(p.id), db.programProjects.byProgram(p.id)]);
+    const dir = await dirMap(); const rooms = roomsOf(students, dir); const meta = p.meta || {};
+    const out = []; const add = (level, area, text) => out.push({ level, area, text });
+    if (!meta.courseCode || !meta.courseName) add('warn', 'Course', 'Course code or course name is missing.');
+    if (!students.length) add('error', 'Students', 'No students uploaded yet.');
+    else add('ok', 'Students', `${students.length} students in ${rooms.length} room(s).`);
+    const noFac = rooms.filter((r) => !r.faculty.length);
+    if (noFac.length) add('error', 'Faculty', `No faculty in ${noFac.length} room(s): ${noFac.map((r) => r.label).join(', ')}.`);
+    if (await otpOn()) {
+      const noMail = [...new Map(rooms.flatMap((r) => r.faculty).filter((f) => !f.hasEmail).map((f) => [f.key, f.name])).values()];
+      if (noMail.length) add('error', 'Faculty', `No email registered for ${noMail.length} faculty, so they cannot sign in: ${noMail.slice(0, 8).join(', ')}${noMail.length > 8 ? '…' : ''}.`);
+    }
+    const heavy = rooms.filter((r) => r.faculty.length && r.students / r.faculty.length > 45);
+    if (heavy.length) add('warn', 'Faculty', `Heavy load (more than 45 students per faculty) in ${heavy.map((r) => `${r.label} (${r.students}/${r.faculty.length})`).join(', ')}.`);
+    if (rooms.length && !noFac.length) add('ok', 'Faculty', `Every room has faculty (${new Set(rooms.flatMap((r) => r.faculty.map((f) => f.key))).size} in total).`);
+    const att = sessions.filter((s) => s.kind === 'attendance'), rev = sessions.filter((s) => s.kind === 'review');
+    if (!att.length) add('warn', 'Schedule', 'No attendance session is scheduled.');
+    if ((meta.reviews || 0) > rev.length) add('warn', 'Schedule', `${meta.reviews} review(s) planned but ${rev.length} scheduled.`);
+    const noTime = sessions.filter((s) => !windowOf(s));
+    if (noTime.length) add('error', 'Schedule', `No date/time for: ${noTime.map((s) => s.name).join(', ')}.`);
+    const timed = sessions.map((s) => ({ s, w: windowOf(s) })).filter((x) => x.w).sort((a, b) => a.w.start - b.w.start);
+    for (let i = 1; i < timed.length; i++) if (timed[i].s.kind === timed[i - 1].s.kind && timed[i].w.start < timed[i - 1].w.end) add('warn', 'Schedule', `${timed[i - 1].s.name} and ${timed[i].s.name} overlap.`);
+    const past = timed.filter((x) => x.w.end < Date.now() && !(x.s.autoState === 'closed'));
+    if (past.length && meta.status !== 'live') add('warn', 'Schedule', `Already in the past: ${past.map((x) => x.s.name).join(', ')}.`);
+    if (timed.length && !noTime.length) add('ok', 'Schedule', `${att.length} attendance and ${rev.length} review session(s) scheduled; rooms open and close on time automatically.`);
+    if (rev.length || meta.reviews) {
+      const b = new Map(); for (const s of students) if (s.batchNo) { const k = `${roomKey(s.room)}|${s.batchNo}`; if (!b.has(k)) b.set(k, s); }
+      const loose = students.filter((s) => !s.batchNo).length;
+      if (!b.size) add('warn', 'Batches', 'No batches yet: either make them now, or the faculty form them during the review.');
+      else {
+        add(loose ? 'warn' : 'ok', 'Batches', `${b.size} batches${loose ? `; ${loose} student(s) not in a batch` : ''}.`);
+        const noProj = [...b.values()].filter((s) => !s.project).length;
+        if (projects.length && noProj) add('warn', 'Projects', `${noProj} batch(es) have no project yet.`);
+        else if (projects.length) add('ok', 'Projects', `Every batch has a project (${projects.length} in the list).`);
+      }
+      if (!projects.length) add('warn', 'Projects', 'No project list uploaded (faculty can still type the project title).');
+    }
+    const rub = await rubricFor(p.id); const total = rub.tables.reduce((n, t) => n + t.criteria.reduce((m, c) => m + c.max, 0), 0);
+    add('ok', 'Rubric', `${p.meta?.rubric ? 'Own rubric' : 'Default rubric'}: ${rub.tables.reduce((n, t) => n + t.criteria.length, 0)} criteria, ${total} marks.`);
+    res.json({ checks: out, ready: !out.some((c) => c.level === 'error') });
   });
 
   // =============== FACULTY SIGN-IN (email OTP) ===============
@@ -766,7 +1215,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
       const p = await db.programAttendance.get(c.session.id, c.room);
       return res.json({ ...base, posting: p ? { postedAt: p.postedAt, present: p.present, absent: p.absent, total: p.total, by: p.facultyName } : null, students: c.students.map((s) => ({ ...lite(s), present: p ? !!p.marks[s.reg] : null })) });
     }
-    const rubric = await getRubric(); const critMax = critMaxOf(rubric);
+    const rubric = await rubricFor(c.session.programId); const critMax = critMaxOf(rubric);
     const scores = new Map((await db.programScores.bySession(c.session.id)).filter((s) => s.room === c.room).map((s) => [s.reg, s]));
     // totals from this room's earlier review rounds, so the faculty can see them while marking
     const earlier = (await db.programSessions.byProgram(c.session.programId))
@@ -780,7 +1229,8 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     }
     // the project register for this room's certification course(s)
     const codes = [...new Set(c.students.map((s) => (s.courseCode || '').toUpperCase()).filter(Boolean))];
-    const projects = codes.length ? await db.courseProjects.byCourses(codes) : [];
+    const own = await db.programProjects.byProgram(c.session.programId); // the coordinator's own list comes first
+    const projects = own.length ? own.map((p) => ({ ...p, courseCode: p.courseCode || codes[0] || '' })) : codes.length ? await db.courseProjects.byCourses(codes) : [];
     const courses = codes.map((code) => ({ code, name: c.students.find((s) => (s.courseCode || '').toUpperCase() === code)?.courseName || '' }));
     res.json({
       ...base, rubric, courses, previous, projects: projects.map((p) => ({ projectId: p.projectId, title: p.title, domain: p.domain, courseCode: p.courseCode })),
@@ -812,7 +1262,7 @@ export function registerProgramRoutes(app, { db, requireAdmin, getRubric }) {
     if (c.session.kind !== 'review') return res.status(400).json({ error: 'This is not a review session.' });
     if (!c.open) return res.status(403).json({ error: 'Review for this room is not open. Please ask the coordinator to open it.' });
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
-    const critMax = critMaxOf(await getRubric());
+    const critMax = critMaxOf(await rubricFor(c.session.programId));
     const mine = new Set(c.students.map((s) => s.reg));
     const now = new Date().toISOString(); let saved = 0; const projects = []; const batches = new Map();
     for (const r of rows) {

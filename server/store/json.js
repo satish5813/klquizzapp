@@ -198,9 +198,15 @@ export const jsonDb = {
     all: async () => read('programs').slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
     get: async (id) => read('programs').find((p) => p.id === id) || null,
     add: async (p) => { const cur = read('programs'); cur.push(p); write('programs', cur); return p; },
-    update: async (id, patch) => { const cur = read('programs'); const i = cur.findIndex((p) => p.id === id); if (i === -1) return null; if (typeof patch.title === 'string') cur[i].title = patch.title; write('programs', cur); return cur[i]; },
+    update: async (id, patch) => {
+      const cur = read('programs'); const i = cur.findIndex((p) => p.id === id); if (i === -1) return null;
+      if (typeof patch.title === 'string') cur[i].title = patch.title;
+      if (patch.meta && typeof patch.meta === 'object') cur[i].meta = patch.meta;
+      if (typeof patch.ownerCc === 'string') cur[i].ownerCc = patch.ownerCc;
+      write('programs', cur); return { ownerCc: '', meta: {}, ...cur[i] };
+    },
     remove: async (id) => {
-      for (const f of ['programScores', 'programAttendance', 'programSessions', 'programStudents']) write(f, read(f).filter((x) => x.programId !== id));
+      for (const f of ['programScores', 'programAttendance', 'programSessions', 'programStudents', 'programProjects']) write(f, read(f).filter((x) => x.programId !== id));
       write('programs', read('programs').filter((p) => p.id !== id));
     },
   },
@@ -235,6 +241,25 @@ export const jsonDb = {
       }
       write('programStudents', cur);
     },
+    updateOne: async (pid, reg, p) => {
+      const cur = read('programStudents'); const s = cur.find((x) => x.programId === pid && String(x.reg) === String(reg)); if (!s) return null;
+      for (const k of ['name', 'branch', 'section', 'room', 'empId', 'facultyName', 'batchNo', 'reviewer', 'project', 'ps', 'courseCode', 'courseName']) if (typeof p[k] === 'string') s[k] = p[k];
+      if (Array.isArray(p.facultyList)) s.facultyList = p.facultyList;
+      write('programStudents', cur); return s;
+    },
+    removeOne: async (pid, reg) => { const cur = read('programStudents'); const keep = cur.filter((x) => !(x.programId === pid && String(x.reg) === String(reg))); write('programStudents', keep); return cur.length - keep.length; },
+  },
+  ccAccounts: {
+    all: async () => read('ccAccounts').slice().sort((a, b) => String(a.name).localeCompare(String(b.name))),
+    get: async (id) => read('ccAccounts').find((c) => c.id === id) || null,
+    byEmail: async (email) => read('ccAccounts').find((c) => String(c.email || '').toLowerCase() === String(email).toLowerCase()) || null,
+    byEmp: async (empId) => read('ccAccounts').find((c) => String(c.empId || '') === String(empId)) || null,
+    upsert: async (c) => { const cur = read('ccAccounts').filter((x) => x.id !== c.id); cur.push({ ...c, active: c.active !== false }); write('ccAccounts', cur); return c; },
+    remove: async (id) => write('ccAccounts', read('ccAccounts').filter((c) => c.id !== id)),
+  },
+  programProjects: {
+    byProgram: async (pid) => read('programProjects').filter((p) => p.programId === pid),
+    replace: async (pid, rows) => { write('programProjects', [...read('programProjects').filter((p) => p.programId !== pid), ...rows.map((r) => ({ ...r, programId: pid }))]); return rows.length; },
   },
   // ---- certification exams ----
   certCourses: {
